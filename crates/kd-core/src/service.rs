@@ -302,10 +302,6 @@ impl Service {
         self.strategy
     }
 
-    pub fn set_strategy(&mut self, strategy: Strategy) {
-        self.strategy = strategy;
-    }
-
     pub fn is_connected(&self, display: DisplayId) -> bool {
         !offline::is_offline(display) && power::is_connected(display)
     }
@@ -447,10 +443,6 @@ impl Service {
         gamma::apply(display, adjustment)
     }
 
-    pub fn reset_colour(&self, display: DisplayId) -> bool {
-        gamma::reset(display)
-    }
-
     // --- Night Shift ---------------------------------------------------------
 
     /// Native Night Shift is global even though macOS presents it inside
@@ -478,21 +470,5 @@ impl Service {
 
     pub fn set_input_source(&self, display: DisplayId, source: u16) {
         self.ddc.write(display, vcp::INPUT_SOURCE, source);
-    }
-
-    pub fn set_contrast(&self, display: DisplayId, value: f64) {
-        self.ddc.write(
-            display,
-            vcp::CONTRAST,
-            (value.clamp(0.0, 1.0) * 100.0) as u16,
-        );
-    }
-
-    pub fn set_speaker_volume(&self, display: DisplayId, value: f64) {
-        self.ddc.write(
-            display,
-            vcp::SPEAKER_VOLUME,
-            (value.clamp(0.0, 1.0) * 100.0) as u16,
-        );
     }
 }

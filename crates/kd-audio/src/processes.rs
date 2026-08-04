@@ -56,14 +56,6 @@ pub fn all() -> Vec<Process> {
 }
 
 /// Only the ones making sound now — what the mixer shows a fader for.
-/// The audio process object for a running process, if the system has one.
-///
-/// Only processes that have played audio at some point get an object, so this
-/// is `None` for a process that has never made a sound.
-pub fn by_pid(pid: i32) -> Option<Process> {
-    all().into_iter().find(|process| process.pid == pid)
-}
-
 pub fn playing() -> Vec<Process> {
     all()
         .into_iter()

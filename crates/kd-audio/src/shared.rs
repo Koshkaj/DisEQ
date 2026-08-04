@@ -259,3 +259,70 @@ fn errno() -> i32 {
     // SAFETY: `__error` returns a pointer to this thread's errno.
     unsafe { *libc::__error() }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The driver is compiled separately and loaded into coreaudiod, so a
+    /// mismatch here is not a build error — it is silence at runtime, which is
+    /// the hardest failure in this project to recognise.
+    const DRIVER: &str = include_str!("../../../driver/Source/DisEQ.c");
+
+    #[test]
+    fn the_segment_name_is_the_one_the_driver_creates() {
+        assert!(
+            DRIVER.contains(&format!("#define kSharedName    \"{NAME}\"")),
+            "driver/Source/DisEQ.c no longer creates {NAME}"
+        );
+    }
+
+    #[test]
+    fn the_magic_is_the_one_the_driver_publishes() {
+        assert!(
+            DRIVER.contains(&format!("#define kSharedMagic   0x{MAGIC:X}")),
+            "driver/Source/DisEQ.c no longer publishes magic 0x{MAGIC:X}"
+        );
+    }
+
+    #[test]
+    fn the_version_is_the_one_the_driver_publishes() {
+        assert!(
+            DRIVER.contains(&format!("#define kSharedVersion {VERSION}u")),
+            "driver/Source/DisEQ.c no longer publishes version {VERSION}"
+        );
+    }
+
+    #[test]
+    fn the_header_matches_the_c_struct_field_for_field() {
+        // Same order, same widths: the reader casts the mapping straight to
+        // this type, so a field inserted on one side alone silently shifts
+        // every field after it.
+        let c_fields: Vec<&str> = DRIVER
+            .split("struct kd_SharedHeader {")
+            .nth(1)
+            .expect("the driver still declares kd_SharedHeader")
+            .split('}')
+            .next()
+            .unwrap()
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix("_Atomic "))
+            .filter_map(|line| line.strip_suffix(';'))
+            .collect();
+
+        assert_eq!(
+            c_fields,
+            vec![
+                "uint32_t magic",
+                "uint32_t version",
+                "uint32_t channels",
+                "uint32_t capacityFrames",
+                "uint64_t sampleRateBits",
+                "int64_t written",
+                "uint32_t running",
+                "uint32_t reserved",
+            ]
+        );
+        assert_eq!(std::mem::size_of::<Header>(), 4 * 4 + 8 + 8 + 4 + 4);
+    }
+}

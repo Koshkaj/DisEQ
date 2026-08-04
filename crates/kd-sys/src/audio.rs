@@ -35,7 +35,6 @@ const STREAM_CONFIGURATION: u32 = fourcc(b"slay");
 const DEVICE_UID: u32 = fourcc(b"uid ");
 const TRANSPORT_TYPE: u32 = fourcc(b"tran");
 const NOMINAL_SAMPLE_RATE: u32 = fourcc(b"nsrt");
-const ACTUAL_SAMPLE_RATE: u32 = fourcc(b"asrt");
 /// How far ahead of the read/write head the device's own buffering sits.
 /// Bridging two devices needs both, or the ring between them starves.
 const SAFETY_OFFSET: u32 = fourcc(b"saft");
@@ -478,19 +477,6 @@ pub fn nominal_sample_rate(device: AudioObjectId) -> Option<f64> {
     get(
         device,
         &address(NOMINAL_SAMPLE_RATE, SCOPE_GLOBAL),
-        &mut value,
-    )
-    .then_some(value)
-}
-
-/// The rate the device is actually running at, which drifts from the nominal
-/// one. The difference between two devices' actual rates is what a bridge
-/// between them has to absorb.
-pub fn actual_sample_rate(device: AudioObjectId) -> Option<f64> {
-    let mut value: f64 = 0.0;
-    get(
-        device,
-        &address(ACTUAL_SAMPLE_RATE, SCOPE_GLOBAL),
         &mut value,
     )
     .then_some(value)

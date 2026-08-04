@@ -4,7 +4,6 @@ use std::ffi::{c_char, c_void, CString};
 
 use objc2_core_foundation::{CFDictionary, CFRetained, CFString, CFType};
 
-pub type IOReturn = i32;
 pub type IoObject = u32;
 pub type IoIterator = u32;
 pub type IoService = u32;
@@ -145,15 +144,6 @@ pub fn find_in_ancestry<T>(
 /// IORegistry dictionaries are always string-keyed, so they are handed back
 /// typed — the untyped `CFDictionary` cannot be indexed.
 pub type PropertyDictionary = CFDictionary<CFString, CFType>;
-
-pub fn property_dictionary(
-    service: IoService,
-    key: &str,
-) -> Option<CFRetained<PropertyDictionary>> {
-    let value = search_parent_property(service, key)?;
-    let dictionary = value.downcast::<CFDictionary>().ok()?;
-    Some(unsafe { CFRetained::cast_unchecked(dictionary) })
-}
 
 pub fn property_string(service: IoService, key: &str) -> Option<String> {
     let value = search_parent_property(service, key)?;

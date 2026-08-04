@@ -39,6 +39,30 @@ const SETTLE_TICKS: u32 = 30;
 /// is imperceptible and the file is written on the way out anyway.
 const SAVE_TICKS: u32 = 30;
 
+/// The part of a device poll the Sound card draws, sampled either side of
+/// [`SoundService::follow_system_output`] so a poll can say whether the panel
+/// has anything new to show.
+#[derive(Clone, PartialEq, Eq, Debug)]
+struct Poll {
+    routing: bool,
+    output: String,
+}
+
+impl Poll {
+    /// Whether the panel has to be rebuilt to show this poll.
+    ///
+    /// Routing steadily is deliberately not a change. It used to count as one,
+    /// which redrew the entire panel about four times a second to animate a
+    /// level meter the card no longer has. Every rebuild replaces the row under
+    /// the pointer, and a fresh tracking area under a pointer that is not
+    /// moving never receives `mouseEntered:` — so the highlight blinked — while
+    /// a rebuild landing mid-press threw away the button holding the mouse down
+    /// and swallowed the click.
+    fn changed(&self, next: &Self) -> bool {
+        self != next
+    }
+}
+
 /// What this machine will let the Sound section do.
 #[derive(Clone, Debug)]
 pub struct Availability {
@@ -813,15 +837,16 @@ impl SoundService {
             }
         }
 
-        let before = self.output_name();
-        let was_routing = self.is_routing();
+        let before = Poll {
+            routing: self.is_routing(),
+            output: self.output_name(),
+        };
         self.follow_system_output();
-        // While routing, the poll rate is also the redraw rate: the level meter
-        // on the card is only worth showing if it moves.
-        ramped
-            || self.is_routing()
-            || was_routing != self.is_routing()
-            || before != self.output_name()
+        let after = Poll {
+            routing: self.is_routing(),
+            output: self.output_name(),
+        };
+        ramped || before.changed(&after)
     }
 
     /// Whether the frame timer is still worth running. The device poll needs it
@@ -1001,5 +1026,40 @@ mod tests {
         let availability = Availability { driver: true };
         assert!(availability.eq_blocked().is_none());
         assert!(availability.mixer_blocked().is_none());
+    }
+
+    fn poll(routing: bool, output: &str) -> Poll {
+        Poll {
+            routing,
+            output: output.to_string(),
+        }
+    }
+
+    #[test]
+    fn a_steady_route_does_not_ask_for_a_redraw() {
+        // The regression that made the panel flicker and swallow clicks: a
+        // route that is simply still running is not news, however long it runs.
+        let before = poll(true, "Scarlett 2i2 USB");
+        assert!(!before.changed(&poll(true, "Scarlett 2i2 USB")));
+    }
+
+    #[test]
+    fn a_steady_silence_does_not_ask_for_a_redraw() {
+        let before = poll(false, "MacBook Pro Speakers");
+        assert!(!before.changed(&poll(false, "MacBook Pro Speakers")));
+    }
+
+    #[test]
+    fn starting_and_stopping_a_route_asks_for_a_redraw() {
+        let idle = poll(false, "MacBook Pro Speakers");
+        let routing = poll(true, "MacBook Pro Speakers");
+        assert!(idle.changed(&routing));
+        assert!(routing.changed(&idle));
+    }
+
+    #[test]
+    fn changing_the_output_asks_for_a_redraw() {
+        let before = poll(true, "MacBook Pro Speakers");
+        assert!(before.changed(&poll(true, "Scarlett 2i2 USB")));
     }
 }

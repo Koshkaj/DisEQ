@@ -6,8 +6,6 @@
 //! `AVAudioFormat`'s standard format uses, so no conversion happens anywhere in
 //! the signal path.
 
-use std::ffi::c_void;
-
 use objc2_core_audio_types::{
     kAudioFormatFlagIsFloat, kAudioFormatFlagIsNonInterleaved, kAudioFormatFlagIsPacked,
     kAudioFormatLinearPCM, AudioBufferList, AudioStreamBasicDescription,
@@ -171,10 +169,6 @@ impl StereoBufferList {
 
     pub fn as_ptr(&mut self) -> *mut AudioBufferList {
         &mut self.list
-    }
-
-    pub fn as_void(&mut self) -> *mut c_void {
-        self.as_ptr() as *mut c_void
     }
 }
 

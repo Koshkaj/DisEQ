@@ -113,9 +113,3 @@ fn restore(display: DisplayId) {
         };
     }
 }
-
-/// Runs `handler` on every reconfiguration, for callers that just want to know
-/// the layout moved.
-pub fn on_change(handler: impl Fn() + Send + Sync + 'static) {
-    watch::on_reconfiguration(move |_, _| handler());
-}

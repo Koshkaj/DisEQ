@@ -875,6 +875,13 @@ impl AppDelegate {
         else {
             return;
         };
+        // Never swap the view tree out from under a press. The button holding
+        // the mouse down would be discarded before it could match the mouse-up,
+        // and the click would vanish with it. Whatever prompted this rebuild is
+        // polled state, so the next tick redraws it a frame later.
+        if appkit::mouse_is_down() {
+            return;
+        }
         // A display that was off when the backends were probed has none, so a
         // reconnected one would show a dead brightness slider until restart.
         service.borrow_mut().refresh_if_stale();
@@ -891,6 +898,10 @@ impl AppDelegate {
             self,
         );
         panel.set_body(&body);
+        // The rows under the pointer are new objects with their hover state
+        // cleared, and a stationary pointer generates no crossing event to turn
+        // it back on.
+        appkit::sync_hover(&body);
     }
 
     fn new(mtm: MainThreadMarker) -> Retained<Self> {

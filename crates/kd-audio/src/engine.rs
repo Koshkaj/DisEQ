@@ -88,11 +88,6 @@ impl EqUnit {
         unsafe { self.unit.globalGain() }
     }
 
-    pub fn is_bypassed(&self) -> bool {
-        // SAFETY: property read.
-        unsafe { self.unit.bypass() }
-    }
-
     /// The unit as a graph node, for `attach` and `connect`.
     pub fn node(&self) -> &AVAudioNode {
         &self.unit

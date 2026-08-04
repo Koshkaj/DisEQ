@@ -38,15 +38,14 @@ const RETRY_DELAY: Duration = Duration::from_millis(20);
 const WRITE_CYCLES: usize = 2;
 const WRITE_DELAY: Duration = Duration::from_millis(10);
 
+/// The VCP codes this project drives, by their MCCS numbers. Only the ones
+/// something actually reads or writes: the standard defines dozens more, and an
+/// unused table entry is indistinguishable from a supported feature.
 pub mod vcp {
     pub const LUMINANCE: u8 = 0x10;
     pub const CONTRAST: u8 = 0x12;
-    pub const RED_GAIN: u8 = 0x16;
-    pub const GREEN_GAIN: u8 = 0x18;
-    pub const BLUE_GAIN: u8 = 0x1A;
     pub const INPUT_SOURCE: u8 = 0x60;
     pub const SPEAKER_VOLUME: u8 = 0x62;
-    pub const AUDIO_MUTE: u8 = 0x8D;
     pub const POWER_MODE: u8 = 0xD6;
 }
 

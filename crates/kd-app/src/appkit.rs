@@ -494,6 +494,11 @@ impl KdRow {
         self.tag()
     }
 
+    /// Whether the row is currently drawing its hover highlight.
+    fn is_hovered(&self) -> bool {
+        self.ivars().hovered.get()
+    }
+
     /// Changes only the wrapper layer and disables implicit Core Animation
     /// actions. The row's content and the vibrancy/card layers never redraw.
     fn set_hovered(&self, hovered: bool) {
@@ -608,7 +613,103 @@ pub fn run_interaction_self_test(mtm: MainThreadMarker) -> Result<(), String> {
         return Err("a clickable card intercepted its nested switch".into());
     }
 
+    // A rebuild replaces the hovered row with a fresh one whose highlight is
+    // off, and a pointer that has not moved sends no crossing event to switch
+    // it back on. `sync_hover` is what restores it; this checks the placement
+    // logic it runs on the new tree.
+    let stale = label(mtm, "Row that was replaced");
+    let stale = build_clickable_row(mtm, &stale, 9, &probe, sel!(probeClicked:), true);
+    let fresh = label(mtm, "Row now under the pointer");
+    let fresh = build_clickable_row(mtm, &fresh, 10, &probe, sel!(probeClicked:), true);
+    let tree = NSView::new(mtm);
+    tree.addSubview(&stale);
+    tree.addSubview(&fresh);
+    let (stale, fresh) = (
+        stale
+            .downcast_ref::<KdRow>()
+            .ok_or_else(|| "rebuilt row lost its concrete control type".to_string())?,
+        fresh
+            .downcast_ref::<KdRow>()
+            .ok_or_else(|| "rebuilt row lost its concrete control type".to_string())?,
+    );
+    stale.set_hovered(true);
+
+    let under_pointer: *const NSView = (fresh as *const KdRow).cast();
+    apply_hover(&tree, &[under_pointer]);
+    if !fresh.is_hovered() {
+        return Err("a rebuilt row under the pointer did not regain its highlight".into());
+    }
+    if stale.is_hovered() {
+        return Err("a row away from the pointer kept a stale highlight".into());
+    }
+
+    if mouse_is_down() {
+        return Err("no mouse button is held, yet the press guard reports one".into());
+    }
+
     Ok(())
+}
+
+/// Whether a mouse button is currently held down anywhere.
+///
+/// A rebuild that lands mid-press throws away the very button the user is
+/// pressing, so the press has nothing to complete against and the click is
+/// silently lost. Callers defer the rebuild until the button comes back up.
+pub fn mouse_is_down() -> bool {
+    NSEvent::pressedMouseButtons() != 0
+}
+
+/// Re-applies the hover highlight to whichever rows sit under the pointer.
+///
+/// A rebuild replaces every row with a fresh instance whose hover state starts
+/// off, and AppKit only sends `mouseEntered:` when the pointer *crosses* a
+/// tracking area's edge — installing one underneath a pointer that is not
+/// moving produces no event at all. Without this the highlight drops on every
+/// rebuild and comes back only when the user jiggles the mouse, which is what
+/// reads as flicker.
+pub fn sync_hover(root: &NSView) {
+    let Some(window) = root.window() else { return };
+    let Some(content) = window.contentView() else {
+        return;
+    };
+    // Before the panel is on screen its frame is still the previous session's,
+    // so the pointer cannot be resolved against it yet. Opening the panel ends
+    // with a real crossing event anyway.
+    if !window.isVisible() {
+        return;
+    }
+    // `set_body` resizes the window, which moves every row. Hit-testing against
+    // frames from before that resize would highlight the wrong row.
+    content.layoutSubtreeIfNeeded();
+    let screen_point = NSEvent::mouseLocation();
+    // A pointer outside the window still has to clear stale highlights, and
+    // `hitTest:` already answers nil for a point beyond the content view.
+    let window_point = window.convertPointFromScreen(screen_point);
+    let hit: *mut NSView = unsafe { msg_send![&*content, hitTest: window_point] };
+
+    // Nested tracking areas all contain the point, so AppKit would highlight
+    // the hit row and every clickable surface enclosing it. Walking the
+    // superview chain reproduces exactly that set.
+    let mut chain: Vec<*const NSView> = Vec::new();
+    let mut node = unsafe { hit.as_ref() }.map(|view| view.retain());
+    while let Some(view) = node {
+        chain.push(Retained::as_ptr(&view));
+        // SAFETY: the view is retained for the duration of this call and
+        // `superview` only reads the hierarchy on the main thread.
+        node = unsafe { view.superview() };
+    }
+
+    apply_hover(root, &chain);
+}
+
+fn apply_hover(view: &NSView, chain: &[*const NSView]) {
+    if let Some(row) = view.downcast_ref::<KdRow>() {
+        let ptr: *const NSView = (row as *const KdRow).cast();
+        row.set_hovered(chain.contains(&ptr));
+    }
+    for subview in view.subviews() {
+        apply_hover(&subview, chain);
+    }
 }
 
 /// Installs a tracking area that follows the row's visible bounds.

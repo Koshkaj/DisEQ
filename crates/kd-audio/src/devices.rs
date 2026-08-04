@@ -211,12 +211,6 @@ pub fn set_name(device: &Device, name: &str) -> bool {
     audio::set_string_property(device.id, CUSTOM_PROPERTY_NAME, name)
 }
 
-/// Puts the default name back. The driver treats an empty string as "whatever
-/// you were called to begin with".
-pub fn reset_name(device: &Device) -> bool {
-    set_name(device, "")
-}
-
 pub fn set_default_output(device: &Device) -> bool {
     audio::set_default_output_device(device.id)
 }
