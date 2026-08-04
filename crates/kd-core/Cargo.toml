@@ -1,0 +1,8 @@
+[package]
+name = "kd-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+kd-sys = { workspace = true }

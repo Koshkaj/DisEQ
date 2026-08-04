@@ -1,0 +1,63 @@
+[package]
+name = "kd-audio"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+kd-sys = { workspace = true }
+objc2 = { workspace = true }
+objc2-foundation = { workspace = true }
+block2 = "0.6"
+objc2-core-audio-types = { version = "0.3", features = [
+    "CoreAudioBaseTypes",
+] }
+# Process taps and aggregate devices: the App Mixer.
+objc2-core-audio = { version = "0.3", default-features = false, features = [
+    "std",
+    "AudioHardware",
+    "objc2",
+    "objc2-foundation",
+    "objc2-core-audio-types",
+] }
+objc2-core-foundation = { version = "0.3", features = [
+    "CFArray",
+    "CFBase",
+    "CFDictionary",
+    "CFNumber",
+    "CFString",
+] }
+# AUHAL: the input and output units that move audio between devices.
+objc2-audio-toolbox = { version = "0.3", default-features = false, features = [
+    "std",
+    "AUComponent",
+    "AudioComponent",
+    "AudioOutputUnit",
+    "AudioUnitProperties",
+    "objc2-core-audio-types",
+] }
+objc2-avf-audio = { version = "0.3", features = [
+    "AVAudioBuffer",
+    "AVAudioChannelLayout",
+    "AVAudioEngine",
+    "AVAudioFormat",
+    "AVAudioIONode",
+    "AVAudioMixerNode",
+    "AVAudioNode",
+    "AVAudioPlayerNode",
+    "AVAudioSourceNode",
+    "AVAudioTime",
+    "AVAudioTypes",
+    "AVAudioUnit",
+    "AVAudioUnitEQ",
+    "AVAudioUnitEffect",
+    "AVAudioUnitTimeEffect",
+    "AVAudioUnitVarispeed",
+    "block2",
+    "objc2-audio-toolbox",
+    "objc2-core-audio-types",
+] }
+libc = { workspace = true }
+
+[dev-dependencies]
+libc = { workspace = true }

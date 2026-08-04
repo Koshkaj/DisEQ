@@ -1,0 +1,48 @@
+[package]
+name = "kd-app"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "DisEQ"
+path = "src/main.rs"
+
+[dependencies]
+kd-audio = { workspace = true }
+kd-core = { workspace = true }
+kd-sys = { workspace = true }
+objc2 = { workspace = true }
+objc2-foundation = { workspace = true }
+objc2-quartz-core = { version = "0.3", features = ["CALayer"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+objc2-app-kit = { workspace = true, features = [
+    "NSApplication",
+    "NSButton",
+    "NSCell",
+    "NSColor",
+    "NSControl",
+    "NSEvent",
+    "NSFont",
+    "NSGraphics",
+    "NSImage",
+    "NSImageView",
+    "NSLayoutConstraint",
+    "NSPanel",
+    "NSResponder",
+    "NSRunningApplication",
+    "NSScreen",
+    "NSSlider",
+    "NSStackView",
+    "NSStatusBar",
+    "NSStatusBarButton",
+    "NSStatusItem",
+    "NSSwitch",
+    "NSTextField",
+    "NSTrackingArea",
+    "NSUserInterfaceLayout",
+    "NSView",
+    "NSVisualEffectView",
+    "NSWindow",
+] }

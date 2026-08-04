@@ -1,0 +1,25 @@
+[workspace]
+resolver = "2"
+members = ["crates/kd-sys", "crates/kd-audio", "crates/kd-core", "crates/kd-app"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+
+[workspace.dependencies]
+kd-sys = { path = "crates/kd-sys" }
+kd-audio = { path = "crates/kd-audio" }
+kd-core = { path = "crates/kd-core" }
+objc2 = "0.6"
+objc2-foundation = "0.3"
+objc2-app-kit = "0.3"
+objc2-core-graphics = "0.3"
+libc = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true

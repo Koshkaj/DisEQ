@@ -1,0 +1,17 @@
+[package]
+name = "kd-sys"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+objc2 = { workspace = true }
+objc2-foundation = { workspace = true }
+objc2-core-foundation = { version = "0.3", features = ["CFArray", "CFDictionary", "CFString", "CFCGTypes", "CFNumber"] }
+objc2-core-graphics = { workspace = true, features = [
+    "CGDirectDisplay",
+    "CGDisplayConfiguration",
+    "CGError",
+] }
+objc2-app-kit = { workspace = true, features = ["NSScreen"] }
+libc = { workspace = true }

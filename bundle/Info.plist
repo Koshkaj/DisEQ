@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleName</key>
+	<string>DisEQ</string>
+	<key>CFBundleDisplayName</key>
+	<string>DisEQ</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.koshka.DisEQ</string>
+	<key>CFBundleExecutable</key>
+	<string>DisEQ</string>
+	<key>CFBundleVersion</key>
+	<string>0.1.0</string>
+	<key>CFBundleShortVersionString</key>
+	<string>0.1.0</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>14.4</string>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<!-- Process taps are audio capture as far as TCC is concerned, and both the
+	     equaliser and the App Mixer are built on them, so this prompt appears
+	     once and covers everything. Deliberately not NSMicrophoneUsageDescription:
+	     reading a device's input stream — which is how eqMac does this — needs
+	     microphone consent, and taps let us avoid asking for it. -->
+	<key>NSAudioCaptureUsageDescription</key>
+	<string>DisEQ needs to capture what your Mac is playing so it can equalise it and give each app its own volume slider. Nothing is recorded or sent anywhere.</string>
+	<key>LSUIElement</key>
+	<true/>
+</dict>
+</plist>

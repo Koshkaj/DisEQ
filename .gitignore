@@ -1,0 +1,24 @@
+# Rust and local application builds
+/target/
+
+# Source repositories and research material used only for local reference
+/references/
+
+# Machine-local editor and agent state
+/.claude/
+/.idea/
+/.vscode/
+*.swp
+*.swo
+
+# macOS and Xcode output
+.DS_Store
+*.dSYM/
+*.trace
+*.xcresult
+
+# Local logs and environment overrides
+*.log
+.env
+.env.*
+!.env.example
