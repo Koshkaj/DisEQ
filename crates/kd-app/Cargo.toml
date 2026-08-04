@@ -14,7 +14,7 @@ kd-core = { workspace = true }
 kd-sys = { workspace = true }
 objc2 = { workspace = true }
 objc2-foundation = { workspace = true }
-objc2-quartz-core = { version = "0.3", features = ["CALayer"] }
+objc2-quartz-core = { version = "0.3", features = ["CALayer", "CATransaction"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 objc2-app-kit = { workspace = true, features = [

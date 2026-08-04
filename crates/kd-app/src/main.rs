@@ -7,6 +7,7 @@ mod theme;
 mod views;
 
 use std::cell::{OnceCell, RefCell};
+use std::process::{Command, Stdio};
 
 use kd_core::{DisplayCatalog, Service};
 use kd_sys::gamma::Adjustment;
@@ -38,11 +39,20 @@ fn describe(error: kd_sys::power::PowerError) -> String {
     }
 }
 
+fn app_bundle_path() -> Option<std::path::PathBuf> {
+    let executable = std::env::current_exe().ok()?;
+    let bundle = executable.parent()?.parent()?.parent()?;
+    (bundle.extension()? == "app").then(|| bundle.to_path_buf())
+}
+
 #[derive(Default)]
 struct Ivars {
     status_item: OnceCell<Retained<NSStatusItem>>,
     panel: OnceCell<Panel>,
     state: RefCell<ViewState>,
+    /// The snapshot used to build the visible panel. Resolution previews read
+    /// this instead of re-enumerating every display for every drag event.
+    catalog: RefCell<Option<DisplayCatalog>>,
     service: OnceCell<RefCell<Service>>,
     sound: OnceCell<RefCell<SoundService>>,
     /// Drives preset ramps and the route's drift controller. Held so it can be
@@ -139,6 +149,10 @@ define_class!(
             let Some(display) = catalog.displays.get(index) else {
                 return;
             };
+            let Some(service) = self.service() else { return };
+            if !service.borrow().is_connected(display.id()) {
+                return;
+            }
             let Some(sound) = self.sound() else { return };
 
             let open = sound.borrow_mut().toggle_display_card(display);
@@ -180,6 +194,73 @@ define_class!(
             self.rebuild();
         }
 
+        #[unsafe(method(openSettings:))]
+        fn open_settings(&self, _sender: Option<&AnyObject>) {
+            let mut state = self.ivars().state.borrow_mut();
+            state.route = Route::Settings;
+            state.settings_notice = None;
+            drop(state);
+            self.rebuild();
+        }
+
+        #[unsafe(method(launchAtLoginToggled:))]
+        fn launch_at_login_toggled(&self, sender: Option<&AnyObject>) {
+            let Some(control) = control(sender) else { return };
+            let enabled = control.doubleValue() != 0.0;
+            let notice = match kd_sys::login_item::set_enabled(enabled) {
+                Ok(kd_sys::login_item::Status::RequiresApproval) => {
+                    Some("Approve DisEQ under Login Items in System Settings".into())
+                }
+                Ok(_) => None,
+                Err(error) => Some(error),
+            };
+            self.ivars().state.borrow_mut().settings_notice = notice;
+            self.rebuild();
+        }
+
+        #[unsafe(method(openLoginItemsSettings:))]
+        fn open_login_items_settings(&self, _sender: Option<&AnyObject>) {
+            if !kd_sys::login_item::open_system_settings() {
+                self.ivars().state.borrow_mut().settings_notice =
+                    Some("Could not open Login Items in System Settings".into());
+                self.rebuild();
+            }
+        }
+
+        #[unsafe(method(restartApp:))]
+        fn restart_app(&self, _sender: Option<&AnyObject>) {
+            let Some(bundle) = app_bundle_path() else {
+                self.ivars().state.borrow_mut().settings_notice =
+                    Some("Restart is available only from DisEQ.app".into());
+                self.rebuild();
+                return;
+            };
+            // Wait for applicationWillTerminate to finish restoring the audio
+            // route and display gamma before starting the replacement process.
+            // Passing the PID and path as arguments keeps the fixed helper
+            // script independent of any shell escaping in the bundle path.
+            let launched = Command::new("/bin/sh")
+                .arg("-c")
+                .arg(
+                    "while kill -0 \"$1\" 2>/dev/null; do sleep 0.1; done; \
+                     exec /usr/bin/open -n \"$2\"",
+                )
+                .arg("diseq-restart")
+                .arg(std::process::id().to_string())
+                .arg(bundle)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn();
+            if let Err(error) = launched {
+                self.ivars().state.borrow_mut().settings_notice =
+                    Some(format!("Could not restart DisEQ: {error}"));
+                self.rebuild();
+                return;
+            }
+            NSApplication::sharedApplication(self.mtm()).terminate(None);
+        }
+
         // --- controls -------------------------------------------------------
 
         #[unsafe(method(brightnessChanged:))]
@@ -189,7 +270,7 @@ define_class!(
             let value = control.doubleValue();
 
             self.with_display(index, |service, display| {
-                service.set_brightness(display, value);
+                service.set_brightness(display.id(), value);
             });
             appkit::set_slider_readout(control, &format!("{:.0}%", value * 100.0));
         }
@@ -363,18 +444,28 @@ define_class!(
             }
         }
 
-        #[unsafe(method(resolutionChanged:))]
-        fn resolution_changed(&self, sender: Option<&AnyObject>) {
+        #[unsafe(method(resolutionPreview:))]
+        fn resolution_preview(&self, sender: Option<&AnyObject>) {
             let Some(control) = control(sender) else { return };
             let (index, _) = views::decode_tag(control.tag());
             let choice = control.doubleValue().round() as usize;
 
-            let Some(service) = self.service() else { return };
-            let catalog = DisplayCatalog::load();
-            if let Some(display) = catalog.displays.get(index) {
-                service.borrow().set_resolution(display, choice);
+            if let Some((caption, readout)) = self.resolution_description(index, choice) {
+                appkit::set_slider_caption_and_readout(control, &caption, &readout);
             }
-            self.rebuild();
+
+            // Mouse tracking gets one explicit commit from KDDeferredSlider
+            // after mouse-up. Keyboard and accessibility actions have no such
+            // tracking loop, so commit those immediately.
+            if !appkit::deferred_slider_is_tracking(control) {
+                self.commit_resolution(control);
+            }
+        }
+
+        #[unsafe(method(resolutionCommitted:))]
+        fn resolution_committed(&self, sender: Option<&AnyObject>) {
+            let Some(control) = control(sender) else { return };
+            self.commit_resolution(control);
         }
 
         #[unsafe(method(connectToggled:))]
@@ -385,8 +476,13 @@ define_class!(
 
             let mut failure = None;
             self.with_display(index, |service, display| {
-                if let Err(error) = service.set_connected(display, wants_connected) {
+                if let Err(error) = service.set_connected(display.id(), wants_connected) {
                     failure = Some(describe(error));
+                } else if !wants_connected {
+                    self.ivars().state.borrow_mut().collapse(index);
+                    if let Some(sound) = self.sound() {
+                        sound.borrow_mut().close_display_card(display);
+                    }
                 }
             });
             self.ivars().state.borrow_mut().notice = failure;
@@ -527,11 +623,18 @@ define_class!(
         fn reconnect_displays(&self, _sender: Option<&AnyObject>) {
             let Some(service) = self.service() else { return };
             let restored = service.borrow().reconnect_all();
-            self.ivars().state.borrow_mut().notice = match restored {
+            let message = match restored {
                 0 => Some("No disconnected displays to bring back".to_string()),
                 1 => Some("1 display reconnected".to_string()),
                 count => Some(format!("{count} displays reconnected")),
             };
+            let mut state = self.ivars().state.borrow_mut();
+            if state.route == Route::Settings {
+                state.settings_notice = message;
+            } else {
+                state.notice = message;
+            }
+            drop(state);
             self.rebuild();
 
             // The menu click dismissed the panel, and the result of this is
@@ -711,7 +814,7 @@ impl AppDelegate {
         status_item.setMenu(None);
     }
 
-    fn with_display(&self, index: usize, body: impl FnOnce(&Service, kd_sys::display::DisplayId)) {
+    fn with_display(&self, index: usize, body: impl FnOnce(&Service, &kd_core::Display)) {
         let Some(service) = self.service() else {
             return;
         };
@@ -719,7 +822,49 @@ impl AppDelegate {
         let Some(display) = catalog.displays.get(index) else {
             return;
         };
-        body(&service.borrow(), display.id());
+        body(&service.borrow(), display);
+    }
+
+    fn resolution_description(&self, index: usize, choice: usize) -> Option<(String, String)> {
+        let catalog = self.ivars().catalog.borrow();
+        let display = catalog.as_ref()?.displays.get(index)?;
+        let modes = display.selectable_modes();
+        let mode = modes.get(choice)?;
+        let widest = modes.last()?.width;
+        let caption = if mode.is_hidpi() {
+            "Resolution (HiDPI)"
+        } else {
+            "Resolution"
+        };
+        let readout = if widest > 0 {
+            format!(
+                "{}x{} · {:.0}%",
+                mode.width,
+                mode.height,
+                mode.width as f64 / widest as f64 * 100.0
+            )
+        } else {
+            format!("{}x{}", mode.width, mode.height)
+        };
+        Some((caption.to_string(), readout))
+    }
+
+    fn commit_resolution(&self, control: &NSControl) {
+        let (index, _) = views::decode_tag(control.tag());
+        let choice = control.doubleValue().round() as usize;
+        let display = self
+            .ivars()
+            .catalog
+            .borrow()
+            .as_ref()
+            .and_then(|catalog| catalog.displays.get(index))
+            .cloned()
+            .or_else(|| DisplayCatalog::load().displays.get(index).cloned());
+
+        if let (Some(service), Some(display)) = (self.service(), display) {
+            service.borrow().set_resolution(&display, choice);
+        }
+        self.rebuild();
     }
 
     /// Rebuilds the panel body from a fresh snapshot, so hotplug and changes
@@ -735,6 +880,7 @@ impl AppDelegate {
         service.borrow_mut().refresh_if_stale();
 
         let catalog = DisplayCatalog::load();
+        *self.ivars().catalog.borrow_mut() = Some(catalog.clone());
         let state = self.ivars().state.borrow();
         let body = views::root(
             self.mtm(),
@@ -756,6 +902,18 @@ impl AppDelegate {
 fn main() {
     let mtm = MainThreadMarker::new().expect("must run on the main thread");
     let app = NSApplication::sharedApplication(mtm);
+    if std::env::args().any(|arg| arg == "--interaction-self-test") {
+        match appkit::run_interaction_self_test(mtm) {
+            Ok(()) => {
+                println!("interaction self-test passed");
+                return;
+            }
+            Err(error) => {
+                eprintln!("interaction self-test failed: {error}");
+                std::process::exit(1);
+            }
+        }
+    }
     app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
 
     let delegate = AppDelegate::new(mtm);

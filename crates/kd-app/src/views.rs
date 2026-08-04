@@ -49,6 +49,7 @@ pub fn root(
         }
         Route::Presets => cards.push(presets_card(mtm, sound, target)),
         Route::Outputs => cards.push(outputs_card(mtm, sound, target)),
+        Route::Settings => cards.push(settings_card(mtm, state, target)),
         Route::Root => {
             for (index, display) in catalog.displays.iter().enumerate() {
                 cards.push(display_card(
@@ -77,6 +78,14 @@ fn display_card(
 ) -> Retained<NSView> {
     let mut rows: Vec<Retained<NSView>> = vec![header_row(mtm, display, index, service, target)];
 
+    // An offline display is only an identity plus the control that can bring
+    // it back. With no live display behind it there is nothing meaningful to
+    // disclose, and wrapping the card in a click surface would make the empty
+    // card look interactive.
+    if !service.is_connected(display.id()) {
+        return card_from_rows(mtm, &rows);
+    }
+
     // Closed cards are deliberately only their identity and power switch. The
     // name section above is the primary disclosure control.
     if !sound.display_card_is_open(display) {
@@ -93,13 +102,6 @@ fn display_card(
 
     let brightness = brightness_row(mtm, display, index, service, target);
     let resolution = resolution_row(mtm, display, index, target);
-
-    // A display that is off has no backlight to set and no mode to pick, and
-    // both sliders would be dragging against nothing.
-    if !service.is_connected(display.id()) {
-        appkit::set_enabled(&brightness, false);
-        appkit::set_enabled(&resolution, false);
-    }
 
     rows.push(brightness);
     rows.push(resolution);
@@ -170,14 +172,14 @@ fn header_row(
     } else {
         "display"
     };
-    let icon = appkit::symbol_view(mtm, symbol);
+    let icon = appkit::row_icon(mtm, symbol);
     let name = appkit::title(mtm, display.name());
     // A compact filled dot marks the primary display without competing with
     // the display-type icon or the power switch.
     let main = display
         .snapshot
         .is_main
-        .then(|| appkit::described_symbol_view(mtm, "circle.fill", "Main Display", 7.0));
+        .then(|| appkit::indicator_dot(mtm, 6.0, "Main Display"));
     let spacer = appkit::spacer(mtm);
 
     let toggle = NSSwitch::new(mtm);
@@ -251,7 +253,7 @@ fn resolution_row(
             false,
             0,
             target,
-            sel!(resolutionChanged:),
+            sel!(resolutionPreview:),
             false,
         );
     };
@@ -278,9 +280,9 @@ fn resolution_row(
         modes.len() > 1,
         tag(index, 0),
         target,
-        sel!(resolutionChanged:),
-        // Applying a mode mid-drag would reconfigure the display on every
-        // pixel of travel, so this one fires on mouse-up only.
+        sel!(resolutionPreview:),
+        // Preview continuously, but use a deferred slider so WindowServer is
+        // reconfigured only once after mouse-up.
         false,
     );
     if let Some(slider) = find_slider(&row) {
@@ -315,12 +317,18 @@ fn slider_row(
         &[&caption_label, &spacer, &value_label],
     );
 
-    let slider = NSSlider::new(mtm);
+    let slider = if continuous {
+        NSSlider::new(mtm)
+    } else {
+        appkit::deferred_slider(mtm)
+    };
     slider.setMinValue(min);
     slider.setMaxValue(max);
     slider.setDoubleValue(position);
     slider.setEnabled(enabled);
-    slider.setContinuous(continuous);
+    // Deferred sliders also send continuously; their subclass adds a distinct
+    // commit action after tracking finishes.
+    slider.setContinuous(true);
     slider.setTag(tag_value);
     unsafe {
         slider.setTarget(Some(target));
@@ -354,7 +362,7 @@ fn disclosure_row(
     tag: isize,
     target: &AnyObject,
 ) -> Retained<NSView> {
-    let icon = appkit::symbol_view(mtm, symbol);
+    let icon = appkit::row_icon(mtm, symbol);
     let text = appkit::label(mtm, label);
     let spacer = appkit::spacer(mtm);
     let chevron = appkit::symbol_view(mtm, "chevron.right");
@@ -373,7 +381,7 @@ fn action_row(
     tag: isize,
     target: &AnyObject,
 ) -> Retained<NSView> {
-    let icon = appkit::symbol_view(mtm, symbol);
+    let icon = appkit::row_icon(mtm, symbol);
     let text = appkit::label(mtm, label);
     let spacer = appkit::spacer(mtm);
     let state = appkit::caption(mtm, if on { "On" } else { "Off" });
@@ -465,22 +473,90 @@ fn back_row(mtm: MainThreadMarker, title: &str, target: &AnyObject) -> Retained<
     appkit::clickable_row(mtm, &content, 0, target, sel!(goBack:))
 }
 
-// --- sound, footer ----------------------------------------------------------
+// --- settings, footer -------------------------------------------------------
+
+fn settings_card(mtm: MainThreadMarker, state: &ViewState, target: &AnyObject) -> Retained<NSView> {
+    use kd_sys::login_item::Status;
+
+    let status = kd_sys::login_item::status();
+    let mut rows = vec![back_row(mtm, "Settings", target)];
+    rows.push(switch_row(
+        mtm,
+        "Launch at Login",
+        "power",
+        status == Status::Enabled,
+        status != Status::Unavailable,
+        SwitchControl {
+            tag: 0,
+            target,
+            action: sel!(launchAtLoginToggled:),
+        },
+    ));
+
+    if status == Status::RequiresApproval {
+        rows.push(note_row(mtm, "Approval is required in System Settings"));
+        rows.push(settings_action_row(
+            mtm,
+            "Open Login Items Settings",
+            "gearshape",
+            target,
+            sel!(openLoginItemsSettings:),
+        ));
+    }
+
+    rows.push(settings_action_row(
+        mtm,
+        "Reconnect Displays",
+        "arrow.clockwise",
+        target,
+        sel!(reconnectDisplays:),
+    ));
+    rows.push(settings_action_row(
+        mtm,
+        "Restart DisEQ",
+        "arrow.clockwise.circle",
+        target,
+        sel!(restartApp:),
+    ));
+    rows.push(settings_action_row(
+        mtm,
+        "Quit DisEQ",
+        "power",
+        target,
+        sel!(quitApp:),
+    ));
+
+    if let Some(notice) = state.settings_notice.as_deref() {
+        rows.push(note_row(mtm, notice));
+    }
+    card_from_rows(mtm, &rows)
+}
+
+fn settings_action_row(
+    mtm: MainThreadMarker,
+    label: &str,
+    symbol: &str,
+    target: &AnyObject,
+    action: Sel,
+) -> Retained<NSView> {
+    let icon = appkit::row_icon(mtm, symbol);
+    let text = appkit::label(mtm, label);
+    let spacer = appkit::spacer(mtm);
+    let content = appkit::hstack(mtm, theme::ROW_SPACING, &[&icon, &text, &spacer]);
+    appkit::clickable_row(mtm, &content, 0, target, action)
+}
 
 fn footer_row(mtm: MainThreadMarker, target: &AnyObject) -> Retained<NSView> {
     let left = appkit::spacer(mtm);
-    let settings = appkit::icon_button(mtm, "gearshape", target, sel!(noop:));
-    let more = appkit::icon_button(mtm, "ellipsis", target, sel!(noop:));
-    // Dismisses the panel — quitting lives in the status item's right-click
-    // menu, where it cannot be hit by reflex when closing the window.
-    let close = appkit::icon_button(mtm, "xmark", target, sel!(closePanel:));
-    settings.setEnabled(false);
-    more.setEnabled(false);
+    let settings = appkit::icon_button(mtm, "gearshape", "Settings", target, sel!(openSettings:));
+    // Dismisses the panel; unlike the separate Settings action, this never
+    // quits the application when hit by reflex.
+    let close = appkit::icon_button(mtm, "xmark", "Close", target, sel!(closePanel:));
 
     Retained::into_super(appkit::hstack(
         mtm,
         theme::ROW_SPACING,
-        &[&left, &settings, &more, &close],
+        &[&left, &settings, &close],
     ))
 }
 
@@ -541,14 +617,14 @@ fn sound_card(
     state: &ViewState,
     target: &AnyObject,
 ) -> Retained<NSView> {
-    let icon = appkit::symbol_view(mtm, "speaker.wave.2");
+    let icon = appkit::row_icon(mtm, "speaker.wave.2");
     let title = appkit::title(mtm, "Sound");
     let spacer = appkit::spacer(mtm);
 
     let output_name = appkit::caption(mtm, &sound.output_name());
     let output_chevron = appkit::symbol_view(mtm, "chevron.right");
     let output_content = appkit::hstack(mtm, theme::ROW_SPACING, &[&output_name, &output_chevron]);
-    let output_section = appkit::clickable_row(
+    let output_section = appkit::cursor_clickable_row(
         mtm,
         &output_content,
         sound_tag(0),
@@ -626,8 +702,11 @@ fn sound_rows(
             symbol,
             on,
             available,
-            sound_tag(*action as isize),
-            target,
+            SwitchControl {
+                tag: sound_tag(*action as isize),
+                target,
+                action: sel!(soundSwitched:),
+            },
         ));
         if let Some(reason) = blocked {
             rows.push(note_row(mtm, &reason));
@@ -708,7 +787,7 @@ fn preset_row(mtm: MainThreadMarker, sound: &SoundService, target: &AnyObject) -
         .map(|preset| preset.name)
         .unwrap_or("Manual");
 
-    let icon = appkit::symbol_view(mtm, "list.bullet");
+    let icon = appkit::row_icon(mtm, "list.bullet");
     let text = appkit::label(mtm, "Preset");
     let spacer = appkit::spacer(mtm);
     let detail = appkit::caption(mtm, name);
@@ -837,7 +916,7 @@ fn preamp_row(mtm: MainThreadMarker, sound: &SoundService, target: &AnyObject) -
     let readout = appkit::fixed_caption(
         mtm,
         &format!("{shown:+.1}"),
-        theme::READOUT_WIDTH - 2.0 * theme::ROW_PADDING,
+        theme::READOUT_WIDTH,
         NSTextAlignment::Right,
     );
     let reset = appkit::clickable_row(mtm, &readout, preamp_tag(), target, sel!(resetPreamp:));
@@ -851,22 +930,26 @@ fn preamp_row(mtm: MainThreadMarker, sound: &SoundService, target: &AnyObject) -
 /// A switch, laid out like every other row on the card.
 ///
 /// No caret: a switch that is on shows its controls beneath it, and one that is
-/// off has nothing to show. The row is a plain stack rather than a clickable
-/// one so its icon lines up with the rows above and below — a `KDRow` pads its
-/// content, and the offset is visible when only some rows have one.
+/// off has nothing to show. The row is a plain stack because the switch itself
+/// is the only interactive part.
+struct SwitchControl<'a> {
+    tag: isize,
+    target: &'a AnyObject,
+    action: Sel,
+}
+
 fn switch_row(
     mtm: MainThreadMarker,
     label: &str,
     symbol: &str,
     on: bool,
     available: bool,
-    tag: isize,
-    target: &AnyObject,
+    control: SwitchControl<'_>,
 ) -> Retained<NSView> {
-    let icon = appkit::symbol_view(mtm, symbol);
+    let icon = appkit::row_icon(mtm, symbol);
     let text = appkit::label(mtm, label);
     let spacer = appkit::spacer(mtm);
-    let switch = appkit::switch(mtm, on, tag, target, sel!(soundSwitched:));
+    let switch = appkit::switch(mtm, on, control.tag, control.target, control.action);
     let row = appkit::hstack(mtm, theme::ROW_SPACING, &[&icon, &text, &spacer, &switch]);
 
     let row = Retained::into_super(row);
@@ -916,7 +999,7 @@ fn outputs_card(
     }
 
     for output in &outputs {
-        let icon = appkit::symbol_view(mtm, "speaker.wave.2");
+        let icon = appkit::row_icon(mtm, "speaker.wave.2");
         let name = appkit::label(mtm, &output.name);
         let spacer = appkit::spacer(mtm);
         let current = appkit::caption(

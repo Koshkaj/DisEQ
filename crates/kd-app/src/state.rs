@@ -18,6 +18,8 @@ pub enum Route {
     Presets,
     /// Physical devices that can receive the processed system audio.
     Outputs,
+    /// Application-level preferences and recovery actions.
+    Settings,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -28,6 +30,7 @@ pub struct ViewState {
     pub notice: Option<String>,
     /// Shown on the sound card, for the same reason.
     pub sound_notice: Option<String>,
+    pub settings_notice: Option<String>,
     pub sound_expanded: bool,
     expanded: HashSet<usize>,
 }

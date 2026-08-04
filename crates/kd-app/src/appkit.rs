@@ -3,19 +3,22 @@
 //! No maintained safe AppKit wrapper crate exists for `objc2`, so the parts we
 //! need live here and the rest of the app stays free of message sends.
 
-use std::cell::{Cell, RefCell};
+use std::cell::Cell;
 
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, Sel};
-use objc2::{define_class, msg_send, AnyThread, DefinedClass, MainThreadOnly, Message};
+use objc2::{define_class, msg_send, sel, AnyThread, DefinedClass, MainThreadOnly, Message};
 use objc2_app_kit::{
-    NSApplication, NSButton, NSColor, NSCompositingOperation, NSControl, NSControlStateValueOff,
-    NSControlStateValueOn, NSEvent, NSFont, NSImage, NSImageView, NSLayoutAttribute,
-    NSLayoutConstraintOrientation, NSLineBreakMode, NSSlider, NSStackView, NSStackViewDistribution,
-    NSSwitch, NSTextAlignment, NSTextField, NSTrackingArea, NSTrackingAreaOptions,
-    NSUserInterfaceLayoutOrientation, NSView,
+    NSAccessibility, NSApplication, NSButton, NSColor, NSCompositingOperation, NSControl,
+    NSControlStateValueOff, NSControlStateValueOn, NSCursor, NSEvent, NSFont, NSImage, NSImageView,
+    NSLayoutAttribute, NSLayoutConstraintOrientation, NSLineBreakMode, NSSlider, NSStackView,
+    NSStackViewDistribution, NSSwitch, NSTextAlignment, NSTextField, NSTrackingArea,
+    NSTrackingAreaOptions, NSUserInterfaceLayoutOrientation, NSView,
 };
-use objc2_foundation::{MainThreadMarker, NSData, NSEdgeInsets, NSPoint, NSRect, NSSize, NSString};
+use objc2_foundation::{
+    MainThreadMarker, NSData, NSEdgeInsets, NSObject, NSPoint, NSRect, NSSize, NSString,
+};
+use objc2_quartz_core::CATransaction;
 
 use crate::theme;
 
@@ -108,23 +111,57 @@ pub fn symbol_view(mtm: MainThreadMarker, name: &str) -> Retained<NSImageView> {
     view
 }
 
-/// An SF Symbol whose meaning is available to VoiceOver and as a hover tip.
-pub fn described_symbol_view(
-    mtm: MainThreadMarker,
-    name: &str,
-    description: &str,
-    size: f64,
-) -> Retained<NSImageView> {
-    let view = NSImageView::new(mtm);
-    let name = NSString::from_str(name);
+/// A leading row symbol centred in a shared fixed-width column.
+///
+/// SF Symbols intentionally have different intrinsic widths (`power` is much
+/// narrower than `arrow.clockwise`, for example). The container keeps both the
+/// symbol centres and the text following them aligned across every card.
+pub fn row_icon(mtm: MainThreadMarker, name: &str) -> Retained<NSView> {
+    let icon = symbol_view(mtm, name);
+    let container = NSView::new(mtm);
+    container.setTranslatesAutoresizingMaskIntoConstraints(false);
+    icon.setTranslatesAutoresizingMaskIntoConstraints(false);
+    container.addSubview(&icon);
+
+    for constraint in [
+        container
+            .widthAnchor()
+            .constraintEqualToConstant(crate::theme::ROW_ICON_WIDTH),
+        icon.centerXAnchor()
+            .constraintEqualToAnchor(&container.centerXAnchor()),
+        icon.topAnchor()
+            .constraintEqualToAnchor(&container.topAnchor()),
+        icon.bottomAnchor()
+            .constraintEqualToAnchor(&container.bottomAnchor()),
+    ] {
+        constraint.setActive(true);
+    }
+    container
+        .setContentHuggingPriority_forOrientation(751.0, NSLayoutConstraintOrientation::Horizontal);
+    container
+}
+
+/// A real fixed-size status dot. An SF Symbol image view keeps its own larger
+/// intrinsic symbol metrics even when the image is assigned a smaller nominal
+/// size, so it cannot guarantee the compact marker this UI needs.
+pub fn indicator_dot(mtm: MainThreadMarker, diameter: f64, description: &str) -> Retained<NSView> {
+    let view = NSView::new(mtm);
     let description = NSString::from_str(description);
-    if let Some(image) =
-        NSImage::imageWithSystemSymbolName_accessibilityDescription(&name, Some(&description))
-    {
-        image.setSize(NSSize::new(size, size));
-        view.setImage(Some(&image));
+    view.setTranslatesAutoresizingMaskIntoConstraints(false);
+    view.setWantsLayer(true);
+    if let Some(layer) = view.layer() {
+        layer.setCornerRadius(diameter / 2.0);
+        layer.setBackgroundColor(Some(&NSColor::labelColor().CGColor()));
     }
     view.setToolTip(Some(&description));
+    view.setAccessibilityElement(true);
+    view.setAccessibilityLabel(Some(&description));
+    view.widthAnchor()
+        .constraintEqualToConstant(diameter)
+        .setActive(true);
+    view.heightAnchor()
+        .constraintEqualToConstant(diameter)
+        .setActive(true);
     view.setContentHuggingPriority_forOrientation(751.0, NSLayoutConstraintOrientation::Horizontal);
     view
 }
@@ -223,6 +260,56 @@ pub fn spacer(mtm: MainThreadMarker) -> Retained<NSView> {
 }
 
 // --- controls ---------------------------------------------------------------
+
+#[derive(Default)]
+pub struct DeferredSliderIvars {
+    tracking: Cell<bool>,
+}
+
+define_class!(
+    // SAFETY:
+    // - NSSlider supports subclassing and imposes no extra initialization.
+    // - KDDeferredSlider has no resources requiring Drop.
+    #[unsafe(super(NSSlider))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "KDDeferredSlider"]
+    #[ivars = DeferredSliderIvars]
+    pub struct DeferredSlider;
+
+    impl DeferredSlider {
+        /// Let NSSlider deliver its normal continuous preview actions while it
+        /// tracks, then send one separate commit action after mouse-up.
+        #[unsafe(method(mouseDown:))]
+        fn mouse_down(&self, event: &NSEvent) {
+            self.ivars().tracking.set(true);
+            unsafe { msg_send![super(self), mouseDown: event] }
+            self.ivars().tracking.set(false);
+            let Some(target) = self.target() else { return };
+            let app = NSApplication::sharedApplication(self.mtm());
+            unsafe {
+                app.sendAction_to_from(
+                    sel!(resolutionCommitted:),
+                    Some(&target),
+                    Some(self),
+                )
+            };
+        }
+    }
+);
+
+/// A slider that previews continuously but performs its expensive operation
+/// only once, after mouse-up.
+pub fn deferred_slider(mtm: MainThreadMarker) -> Retained<NSSlider> {
+    let slider = DeferredSlider::alloc(mtm).set_ivars(DeferredSliderIvars::default());
+    let slider: Retained<DeferredSlider> = unsafe { msg_send![super(slider), init] };
+    Retained::into_super(slider)
+}
+
+pub fn deferred_slider_is_tracking(slider: &NSControl) -> bool {
+    slider
+        .downcast_ref::<DeferredSlider>()
+        .is_some_and(|slider| slider.ivars().tracking.get())
+}
 
 /// Horizontal stack whose children are all the same width.
 ///
@@ -341,20 +428,16 @@ pub fn switch(
 
 #[derive(Default)]
 pub struct RowIvars {
-    tag: Cell<isize>,
-    target: RefCell<Option<Retained<AnyObject>>>,
-    action: Cell<Option<Sel>>,
-    tracking: RefCell<Option<Retained<NSTrackingArea>>>,
-    highlight_enabled: Cell<bool>,
-    highlight_base_alpha: Cell<f64>,
-    highlight_target: RefCell<Option<Retained<NSView>>>,
+    hovered: Cell<bool>,
+    hover_alpha: Cell<f64>,
 }
 
 define_class!(
     // SAFETY:
-    // - NSView imposes no subclassing requirements.
+    // - NSButton supports subclassing and supplies the standard press/release
+    //   tracking and action delivery that a clickable row needs.
     // - KdRow does not implement Drop.
-    #[unsafe(super(NSView))]
+    #[unsafe(super(NSButton))]
     #[thread_kind = MainThreadOnly]
     #[name = "KDRow"]
     #[ivars = RowIvars]
@@ -377,54 +460,30 @@ define_class!(
             // A clickable surface may contain a more specific row or a real
             // control. Those retain their actions; passive labels and images
             // defer to this row so the remaining surface acts as one target.
-            if view.downcast_ref::<KdRow>().is_some()
-                || view.downcast_ref::<NSControl>().is_some()
-            {
+            // NSTextField is also an NSControl, even when configured as a
+            // passive label. Preserve only controls that actually own an
+            // interaction; labels and image views defer to the row.
+            if owns_interaction(view) {
                 hit
             } else {
                 (self as *const Self).cast_mut().cast()
             }
         }
 
-        #[unsafe(method(mouseDown:))]
-        fn mouse_down(&self, _event: &NSEvent) {
-            let target = self.ivars().target.borrow().clone();
-            let (Some(target), Some(action)) = (target, self.ivars().action.get()) else {
-                return;
-            };
-            let app = NSApplication::sharedApplication(self.mtm());
-            unsafe { app.sendAction_to_from(action, Some(&target), Some(self)) };
-        }
-
         #[unsafe(method(mouseEntered:))]
         fn mouse_entered(&self, _event: &NSEvent) {
-            self.set_highlighted(true);
+            self.set_hovered(true);
         }
 
         #[unsafe(method(mouseExited:))]
         fn mouse_exited(&self, _event: &NSEvent) {
-            self.set_highlighted(false);
+            self.set_hovered(false);
         }
 
-        /// Tracking areas are tied to a frame, and rows are re-laid out every
-        /// time the panel rebuilds, so the old area has to be replaced.
-        #[unsafe(method(updateTrackingAreas))]
-        fn update_tracking_areas(&self) {
-            if let Some(existing) = self.ivars().tracking.borrow_mut().take() {
-                self.removeTrackingArea(&existing);
-            }
-            let area = unsafe {
-                NSTrackingArea::initWithRect_options_owner_userInfo(
-                    NSTrackingArea::alloc(),
-                    self.bounds(),
-                    NSTrackingAreaOptions::MouseEnteredAndExited
-                        | NSTrackingAreaOptions::ActiveInKeyWindow,
-                    Some(self),
-                    None,
-                )
-            };
-            self.addTrackingArea(&area);
-            *self.ivars().tracking.borrow_mut() = Some(area);
+        #[unsafe(method(resetCursorRects))]
+        fn reset_cursor_rects(&self) {
+            unsafe { msg_send![super(self), resetCursorRects] }
+            self.addCursorRect_cursor(self.bounds(), &NSCursor::pointingHandCursor());
         }
     }
 );
@@ -432,24 +491,146 @@ define_class!(
 impl KdRow {
     /// The row's identity, as encoded by the view layer.
     pub fn tag_value(&self) -> isize {
-        self.ivars().tag.get()
+        self.tag()
     }
 
-    fn set_highlighted(&self, on: bool) {
-        if !self.ivars().highlight_enabled.get() {
+    /// Changes only the wrapper layer and disables implicit Core Animation
+    /// actions. The row's content and the vibrancy/card layers never redraw.
+    fn set_hovered(&self, hovered: bool) {
+        let alpha = self.ivars().hover_alpha.get();
+        if alpha <= 0.0 || self.ivars().hovered.replace(hovered) == hovered {
             return;
         }
-        let target = self.ivars().highlight_target.borrow();
-        let view = target.as_deref().unwrap_or(self);
-        if let Some(layer) = view.layer() {
-            let alpha = if on {
-                0.10
-            } else {
-                self.ivars().highlight_base_alpha.get()
-            };
+        let Some(layer) = self.layer() else { return };
+        CATransaction::begin();
+        CATransaction::setDisableActions(true);
+        if hovered {
             layer.setBackgroundColor(Some(&NSColor::colorWithWhite_alpha(1.0, alpha).CGColor()));
+        } else {
+            layer.setBackgroundColor(None);
+        }
+        CATransaction::commit();
+    }
+}
+
+fn owns_interaction(view: &NSView) -> bool {
+    view.downcast_ref::<KdRow>().is_some()
+        || view.downcast_ref::<NSButton>().is_some()
+        || view.downcast_ref::<NSSlider>().is_some()
+        || view.downcast_ref::<NSSwitch>().is_some()
+}
+
+#[derive(Default)]
+struct InteractionProbeIvars {
+    calls: Cell<usize>,
+}
+
+define_class!(
+    // SAFETY: NSObject has no subclassing requirements and the probe owns no
+    // resources requiring Drop.
+    #[unsafe(super(NSObject))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "KDInteractionProbe"]
+    #[ivars = InteractionProbeIvars]
+    struct InteractionProbe;
+
+    impl InteractionProbe {
+        #[unsafe(method(probeClicked:))]
+        fn probe_clicked(&self, _sender: Option<&AnyObject>) {
+            self.ivars().calls.set(self.ivars().calls.get() + 1);
         }
     }
+);
+
+/// Runs focused AppKit interaction checks in the real application process.
+/// Invoked through `DisEQ --interaction-self-test` by the release verifier.
+pub fn run_interaction_self_test(mtm: MainThreadMarker) -> Result<(), String> {
+    let probe = InteractionProbe::alloc(mtm).set_ivars(InteractionProbeIvars::default());
+    let probe: Retained<InteractionProbe> = unsafe { msg_send![super(probe), init] };
+
+    let text = label(mtm, "Clickable label");
+    let view = build_clickable_row(mtm, &text, 7, &probe, sel!(probeClicked:), true);
+    let row = view
+        .downcast_ref::<KdRow>()
+        .ok_or_else(|| "clickable row lost its concrete control type".to_string())?;
+    row.setFrame(NSRect::new(
+        NSPoint::new(0.0, 0.0),
+        NSSize::new(220.0, 36.0),
+    ));
+    row.layoutSubtreeIfNeeded();
+
+    let hit: *mut NSView = unsafe { msg_send![row, hitTest: NSPoint::new(110.0, 18.0)] };
+    if hit != (row as *const KdRow).cast_mut().cast() {
+        return Err("a passive label swallowed its row click".into());
+    }
+
+    unsafe { row.performClick(None) };
+    if probe.ivars().calls.get() != 1 {
+        return Err("the standard button action was not delivered".into());
+    }
+    row.setEnabled(false);
+    unsafe { row.performClick(None) };
+    if probe.ivars().calls.get() != 1 {
+        return Err("a disabled row still delivered an action".into());
+    }
+    row.setEnabled(true);
+
+    for _ in 0..250 {
+        row.set_hovered(true);
+        if row
+            .layer()
+            .and_then(|layer| layer.animationKeys())
+            .is_some_and(|keys| !keys.is_empty())
+        {
+            return Err("hover created an implicit Core Animation".into());
+        }
+        row.set_hovered(false);
+    }
+
+    let nested = NSSwitch::new(mtm);
+    let surface = clickable_surface(mtm, &nested, 8, &probe, sel!(probeClicked:), false);
+    let surface = surface
+        .downcast_ref::<KdRow>()
+        .ok_or_else(|| "clickable surface lost its concrete control type".to_string())?;
+    surface.setFrame(NSRect::new(
+        NSPoint::new(0.0, 0.0),
+        NSSize::new(220.0, 44.0),
+    ));
+    surface.layoutSubtreeIfNeeded();
+    let nested_bounds = nested.bounds();
+    let nested_center = NSPoint::new(
+        nested_bounds.origin.x + nested_bounds.size.width / 2.0,
+        nested_bounds.origin.y + nested_bounds.size.height / 2.0,
+    );
+    let nested_point = surface.convertPoint_fromView(nested_center, Some(&nested));
+    let hit: *mut NSView = unsafe { msg_send![surface, hitTest: nested_point] };
+    if hit != (&*nested as *const NSSwitch).cast_mut().cast() {
+        return Err("a clickable card intercepted its nested switch".into());
+    }
+
+    Ok(())
+}
+
+/// Installs a tracking area that follows the row's visible bounds.
+fn install_hover(row: &KdRow, alpha: f64, radius: f64) {
+    row.setWantsLayer(true);
+    row.ivars().hover_alpha.set(alpha);
+    if let Some(layer) = row.layer() {
+        layer.setCornerRadius(radius);
+    }
+
+    let area = unsafe {
+        NSTrackingArea::initWithRect_options_owner_userInfo(
+            NSTrackingArea::alloc(),
+            NSRect::ZERO,
+            NSTrackingAreaOptions::MouseEnteredAndExited
+                | NSTrackingAreaOptions::ActiveInKeyWindow
+                | NSTrackingAreaOptions::InVisibleRect,
+            Some(row),
+            None,
+        )
+    };
+    row.addTrackingArea(&area);
 }
 
 /// A row that responds to a click as a single unit.
@@ -460,26 +641,52 @@ pub fn clickable_row(
     target: &AnyObject,
     action: Sel,
 ) -> Retained<NSView> {
+    build_clickable_row(mtm, content, tag, target, action, true)
+}
+
+fn build_clickable_row(
+    mtm: MainThreadMarker,
+    content: &NSView,
+    tag: isize,
+    target: &AnyObject,
+    action: Sel,
+    highlight: bool,
+) -> Retained<NSView> {
     let row = KdRow::alloc(mtm).set_ivars(RowIvars::default());
     let row: Retained<KdRow> = unsafe { msg_send![super(row), init] };
 
-    row.ivars().tag.set(tag);
-    row.ivars().action.set(Some(action));
-    row.ivars().highlight_enabled.set(true);
-    *row.ivars().target.borrow_mut() =
-        Some(unsafe { Retained::retain(target as *const _ as *mut _) }.unwrap());
-
-    row.setTranslatesAutoresizingMaskIntoConstraints(false);
-    row.setWantsLayer(true);
-    if let Some(layer) = row.layer() {
-        layer.setCornerRadius(theme::ROW_CORNER_RADIUS);
+    row.setTitle(&NSString::from_str(""));
+    row.setBordered(false);
+    row.setTag(tag);
+    unsafe {
+        row.setTarget(Some(target));
+        row.setAction(Some(action));
     }
-
+    row.setTranslatesAutoresizingMaskIntoConstraints(false);
+    if highlight {
+        install_hover(&row, 0.10, theme::ROW_CORNER_RADIUS);
+    }
     content.setTranslatesAutoresizingMaskIntoConstraints(false);
     row.addSubview(content);
-    pin_with_padding(content, &row, theme::ROW_PADDING);
+    // Card insets already provide horizontal breathing room. Keeping click-row
+    // padding vertical-only means clickable and control-only rows share the
+    // exact same leading column.
+    pin_with_axis_padding(content, &row, 0.0, theme::ROW_PADDING);
 
-    Retained::into_super(row)
+    button_into_view(Retained::into_super(row))
+}
+
+/// A compact text action that signals clickability with the cursor only.
+/// Useful for controls nested inside a larger card, where another hover layer
+/// would visually compete with (and repaint over) the parent surface.
+pub fn cursor_clickable_row(
+    mtm: MainThreadMarker,
+    content: &NSView,
+    tag: isize,
+    target: &AnyObject,
+    action: Sel,
+) -> Retained<NSView> {
+    build_clickable_row(mtm, content, tag, target, action, false)
 }
 
 /// Makes an existing surface clickable without drawing an inset row around it.
@@ -495,32 +702,44 @@ pub fn clickable_surface(
     let surface = KdRow::alloc(mtm).set_ivars(RowIvars::default());
     let surface: Retained<KdRow> = unsafe { msg_send![super(surface), init] };
 
-    surface.ivars().tag.set(tag);
-    surface.ivars().action.set(Some(action));
-    surface.ivars().highlight_enabled.set(highlight);
-    surface.ivars().highlight_base_alpha.set(0.06);
-    *surface.ivars().highlight_target.borrow_mut() = Some(content.retain());
-    *surface.ivars().target.borrow_mut() =
-        Some(unsafe { Retained::retain(target as *const _ as *mut _) }.unwrap());
-
+    surface.setTitle(&NSString::from_str(""));
+    surface.setBordered(false);
+    surface.setTag(tag);
+    unsafe {
+        surface.setTarget(Some(target));
+        surface.setAction(Some(action));
+    }
     surface.setTranslatesAutoresizingMaskIntoConstraints(false);
-    surface.setWantsLayer(true);
+    if highlight {
+        // The card already has a 0.06 white background. Drawing another 0.04
+        // behind it composites to approximately the former 0.10 hover.
+        install_hover(&surface, 0.04, theme::CARD_CORNER_RADIUS);
+    }
     content.setTranslatesAutoresizingMaskIntoConstraints(false);
     surface.addSubview(content);
     pin(content, &surface);
 
-    Retained::into_super(surface)
+    button_into_view(Retained::into_super(surface))
+}
+
+fn button_into_view(button: Retained<NSButton>) -> Retained<NSView> {
+    let control: Retained<NSControl> = Retained::into_super(button);
+    Retained::into_super(control)
 }
 
 pub fn icon_button(
     mtm: MainThreadMarker,
     symbol: &str,
+    description: &str,
     target: &AnyObject,
     action: Sel,
 ) -> Retained<NSButton> {
     let button = NSButton::new(mtm);
+    let description = NSString::from_str(description);
     button.setTitle(&NSString::from_str(""));
     button.setBordered(false);
+    button.setToolTip(Some(&description));
+    button.setAccessibilityLabel(Some(&description));
     if let Some(image) = symbol_image(symbol) {
         button.setImage(Some(&image));
     }
@@ -555,15 +774,19 @@ pub fn pin(view: &NSView, parent: &NSView) {
 }
 
 fn pin_with_padding(view: &NSView, parent: &NSView, padding: f64) {
+    pin_with_axis_padding(view, parent, padding, padding);
+}
+
+fn pin_with_axis_padding(view: &NSView, parent: &NSView, horizontal: f64, vertical: f64) {
     let constraints = [
         view.leadingAnchor()
-            .constraintEqualToAnchor_constant(&parent.leadingAnchor(), padding),
+            .constraintEqualToAnchor_constant(&parent.leadingAnchor(), horizontal),
         view.trailingAnchor()
-            .constraintEqualToAnchor_constant(&parent.trailingAnchor(), -padding),
+            .constraintEqualToAnchor_constant(&parent.trailingAnchor(), -horizontal),
         view.topAnchor()
-            .constraintEqualToAnchor_constant(&parent.topAnchor(), padding),
+            .constraintEqualToAnchor_constant(&parent.topAnchor(), vertical),
         view.bottomAnchor()
-            .constraintEqualToAnchor_constant(&parent.bottomAnchor(), -padding),
+            .constraintEqualToAnchor_constant(&parent.bottomAnchor(), -vertical),
     ];
     for constraint in &constraints {
         constraint.setActive(true);
@@ -584,6 +807,22 @@ pub fn set_slider_readout(slider: &NSControl, text: &str) {
     // Caption is first, value is last.
     if let Some(value) = labels.last() {
         value.setStringValue(&NSString::from_str(text));
+    }
+}
+
+/// Updates both labels of a slider row for a value whose mode also changes its
+/// caption, such as entering or leaving HiDPI while previewing a resolution.
+pub fn set_slider_caption_and_readout(slider: &NSControl, caption: &str, readout: &str) {
+    let Some(row) = (unsafe { slider.superview() }) else {
+        return;
+    };
+    let mut labels = Vec::new();
+    collect_labels(&row, &mut labels);
+    if let Some(label) = labels.first() {
+        label.setStringValue(&NSString::from_str(caption));
+    }
+    if let Some(value) = labels.last() {
+        value.setStringValue(&NSString::from_str(readout));
     }
 }
 

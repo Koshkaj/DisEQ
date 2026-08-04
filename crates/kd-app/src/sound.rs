@@ -283,6 +283,18 @@ impl SoundService {
         open
     }
 
+    /// Forces an offline display back to its compact state and persists it.
+    pub fn close_display_card(&mut self, display: &Display) {
+        if self
+            .config
+            .open_displays
+            .remove(&display_persistence_key(display))
+        {
+            self.dirty = true;
+            self.save();
+        }
+    }
+
     pub fn sound_card_is_open(&self) -> bool {
         self.config.sound_open
     }

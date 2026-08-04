@@ -9,6 +9,9 @@ pub const ROW_CORNER_RADIUS: f64 = 6.0;
 pub const ROW_PADDING: f64 = 4.0;
 pub const CARD_SPACING: f64 = 8.0;
 pub const ROW_SPACING: f64 = 6.0;
+/// Fixed column for leading SF Symbols. Their intrinsic widths vary, so rows
+/// otherwise start their text at visibly different horizontal positions.
+pub const ROW_ICON_WIDTH: f64 = 20.0;
 
 pub const LABEL_SIZE: f64 = 13.0;
 pub const CAPTION_SIZE: f64 = 11.0;
