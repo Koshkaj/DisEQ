@@ -78,7 +78,7 @@ pub fn symbol_image(name: &str) -> Option<Retained<NSImage>> {
 /// both from an application bundle and in development builds.
 #[allow(deprecated)]
 pub fn widget_image() -> Option<Retained<NSImage>> {
-    let data = NSData::with_bytes(include_bytes!("../../../icon.png"));
+    let data = NSData::with_bytes(include_bytes!("../../../images/icon.png"));
     let source = NSImage::initWithData(NSImage::alloc(), &data)?;
     let size = source.size();
 
