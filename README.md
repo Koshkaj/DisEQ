@@ -150,7 +150,8 @@ optimization roadmap.
 ## Attribution and licensing
 
 Portions of the audio engine are derived from eqMac under Apache License 2.0.
-The applicable license text is included at
+The exact provenance and modifications are listed in
+[ATTRIBUTION.md](ATTRIBUTION.md); the applicable license text is included at
 [LICENSES/Apache-2.0.txt](LICENSES/Apache-2.0.txt).
 
 No license is granted for the remainder of the repository unless one is added
