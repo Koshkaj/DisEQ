@@ -46,6 +46,10 @@ pub struct Config {
     /// Per-application gains, keyed by bundle identifier. Processes do not
     /// survive a relaunch; their bundle IDs do.
     pub app_gains: BTreeMap<String, f32>,
+    /// Set when the offer to install the audio driver was declined, so the
+    /// launch that follows does not ask again. A newer driver than the one
+    /// installed asks regardless — that offer is about a different version.
+    pub driver_prompt_declined: bool,
 }
 
 impl Default for Config {
@@ -60,6 +64,7 @@ impl Default for Config {
             open_displays: BTreeSet::new(),
             sound_open: false,
             app_gains: BTreeMap::new(),
+            driver_prompt_declined: false,
         }
     }
 }

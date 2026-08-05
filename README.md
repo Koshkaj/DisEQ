@@ -41,6 +41,29 @@
 | Launch at Login | Via the public `SMAppService` API, with a shortcut to Login Items when macOS wants approval. |
 | Native and small | Rust directly against AppKit — roughly 14–16 MB idle and 0.0% idle CPU. See [PERFORMANCE.md](PERFORMANCE.md). |
 
+## Install
+
+Download `DisEQ-<version>.dmg` from
+[Releases](https://github.com/Koshkaj/DisEQ/releases), open it, and drag
+**DisEQ** to Applications.
+
+DisEQ is signed ad hoc rather than with an Apple Developer ID, so macOS
+quarantines the download and refuses to open it — on Apple Silicon with
+*"DisEQ is damaged and can't be opened"*, which is Gatekeeper's wording for
+unnotarised, not a corrupt file. Clear the flag once:
+
+```sh
+xattr -dr com.apple.quarantine /Applications/DisEQ.app
+```
+
+The first launch offers to install the audio driver. macOS asks for your
+password, and audio stops for about a second while `coreaudiod` picks the
+plug-in up. Declining is fine — the display controls work regardless, and the
+offer stays in **Settings**, alongside **Uninstall Audio Driver**.
+
+Remove the driver from Settings before deleting the app; the app is the only
+thing that knows how to take it out.
+
 ## Permissions
 
 The equaliser requires **no** capture permission. The HAL plug-in *is* the
@@ -56,8 +79,9 @@ else, including the equaliser, works without it.
 
 ## Requirements
 
-- macOS 14 or newer on Apple Silicon
-- Rust 1.85 or newer
+- macOS 14 or newer, Apple Silicon or Intel
+- Rust 1.85 or newer, with the `aarch64-apple-darwin` and `x86_64-apple-darwin`
+  targets for a release build
 - Xcode command-line tools
 
 ## Build and run
@@ -67,6 +91,14 @@ DisEQ must run from an application bundle for its menu-bar status item to work:
 ```sh
 make app-release
 open target/DisEQ.app
+```
+
+`app-release` builds both architectures and `lipo`s them together, and both
+builds carry the HAL plug-in inside `Contents/Resources`. To produce the disk
+image exactly as it ships:
+
+```sh
+make dmg
 ```
 
 For a debug build and restart during development:
@@ -85,8 +117,11 @@ make lint
 
 ## Audio driver
 
-Audio enhancement requires the companion HAL plug-in. Building it does not
-need administrator privileges:
+Audio enhancement requires the companion HAL plug-in. A released app installs
+it itself, from the copy it carries; the targets below are the development
+path, which acts on `target/DisEQ.driver` directly.
+
+Building it needs no administrator privileges:
 
 ```sh
 make driver
@@ -109,15 +144,13 @@ display capabilities and the native Night Shift toggle require dynamically
 loaded private macOS interfaces. Missing interfaces disable only the affected
 feature rather than preventing the app from launching.
 
-See [technical_docs.md](technical_docs.md) for the system-interface reference
-and [PERFORMANCE.md](PERFORMANCE.md) for the measured release footprint and
+See [PERFORMANCE.md](PERFORMANCE.md) for the measured release footprint and
 optimization roadmap.
 
 ## Attribution and licensing
 
 Portions of the audio engine are derived from eqMac under Apache License 2.0.
-The exact provenance and modifications are listed in
-[ATTRIBUTION.md](ATTRIBUTION.md); the applicable license text is included at
+The applicable license text is included at
 [LICENSES/Apache-2.0.txt](LICENSES/Apache-2.0.txt).
 
 No license is granted for the remainder of the repository unless one is added

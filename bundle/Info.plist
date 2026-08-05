@@ -10,6 +10,9 @@
 	<string>com.koshka.DisEQ</string>
 	<key>CFBundleExecutable</key>
 	<string>DisEQ</string>
+	<!-- Regenerated from images/logo.png by bundle/make_icon.sh. -->
+	<key>CFBundleIconFile</key>
+	<string>DisEQ</string>
 	<key>CFBundleVersion</key>
 	<string>0.1.0</string>
 	<key>CFBundleShortVersionString</key>

@@ -1,5 +1,6 @@
 use kd_audio::eq;
 use kd_core::{Display, DisplayCatalog, Service};
+use kd_sys::driver_install::State as DriverState;
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2::runtime::Sel;
@@ -495,7 +496,7 @@ fn settings_card(mtm: MainThreadMarker, state: &ViewState, target: &AnyObject) -
 
     if status == Status::RequiresApproval {
         rows.push(note_row(mtm, "Approval is required in System Settings"));
-        rows.push(settings_action_row(
+        rows.push(command_row(
             mtm,
             "Open Login Items Settings",
             "gearshape",
@@ -504,21 +505,48 @@ fn settings_card(mtm: MainThreadMarker, state: &ViewState, target: &AnyObject) -
         ));
     }
 
-    rows.push(settings_action_row(
+    // A build with no driver to install — one run straight out of `target/`
+    // rather than from the app bundle — offers neither row.
+    match kd_sys::driver_install::state() {
+        DriverState::NotInstalled => rows.push(command_row(
+            mtm,
+            "Install Audio Driver",
+            "arrow.down.circle",
+            target,
+            sel!(installDriver:),
+        )),
+        DriverState::Outdated { .. } => rows.push(command_row(
+            mtm,
+            "Update Audio Driver",
+            "arrow.down.circle",
+            target,
+            sel!(installDriver:),
+        )),
+        DriverState::Current => rows.push(command_row(
+            mtm,
+            "Uninstall Audio Driver",
+            "trash",
+            target,
+            sel!(uninstallDriver:),
+        )),
+        DriverState::NoBundledDriver => {}
+    }
+
+    rows.push(command_row(
         mtm,
         "Reconnect Displays",
         "arrow.clockwise",
         target,
         sel!(reconnectDisplays:),
     ));
-    rows.push(settings_action_row(
+    rows.push(command_row(
         mtm,
         "Restart DisEQ",
         "arrow.clockwise.circle",
         target,
         sel!(restartApp:),
     ));
-    rows.push(settings_action_row(
+    rows.push(command_row(
         mtm,
         "Quit DisEQ",
         "power",
@@ -532,7 +560,9 @@ fn settings_card(mtm: MainThreadMarker, state: &ViewState, target: &AnyObject) -
     card_from_rows(mtm, &rows)
 }
 
-fn settings_action_row(
+/// A row that is nothing but a label and a click: the shape both Settings and
+/// the Sound card's driver offer use.
+fn command_row(
     mtm: MainThreadMarker,
     label: &str,
     symbol: &str,
@@ -688,6 +718,22 @@ fn sound_rows(
     let mut rows: Vec<Retained<NSView>> = Vec::new();
     let availability = sound.availability();
 
+    // The missing driver disables three of the four switches, so it is reported
+    // once here rather than repeated under each of them — and reported with the
+    // way out attached, since the app carries the driver it is asking for.
+    if let Some(reason) = availability.eq_blocked() {
+        rows.push(note_row(mtm, &reason));
+        if kd_sys::driver_install::state().needs_install() {
+            rows.push(command_row(
+                mtm,
+                "Install Audio Driver",
+                "arrow.down.circle",
+                target,
+                sel!(installDriver:),
+            ));
+        }
+    }
+
     for (label, symbol, action) in SoundAction::ALL {
         let (on, blocked) = match action {
             SoundAction::Routing => (sound.is_routing(), availability.eq_blocked()),
@@ -708,7 +754,8 @@ fn sound_rows(
                 action: sel!(soundSwitched:),
             },
         ));
-        if let Some(reason) = blocked {
+        // The equaliser's only blocker is the driver, already reported above.
+        if let Some(reason) = blocked.filter(|_| *action == SoundAction::AppMixer) {
             rows.push(note_row(mtm, &reason));
         }
         // A switch that is on shows what it turns on, directly beneath itself.

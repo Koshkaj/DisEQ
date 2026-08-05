@@ -15,9 +15,9 @@ use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject};
 use objc2::{define_class, msg_send, sel, DefinedClass, MainThreadOnly};
 use objc2_app_kit::{
-    NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate, NSControl, NSEventMask,
-    NSEventModifierFlags, NSEventType, NSMenu, NSMenuItem, NSStatusBar, NSStatusItem,
-    NSVariableStatusItemLength, NSWindowDelegate,
+    NSAlert, NSAlertFirstButtonReturn, NSApplication, NSApplicationActivationPolicy,
+    NSApplicationDelegate, NSControl, NSEventMask, NSEventModifierFlags, NSEventType, NSMenu,
+    NSMenuItem, NSStatusBar, NSStatusItem, NSVariableStatusItemLength, NSWindowDelegate,
 };
 use objc2_foundation::{
     MainThreadMarker, NSNotification, NSObject, NSObjectProtocol, NSString, NSTimer,
@@ -225,6 +225,16 @@ define_class!(
                     Some("Could not open Login Items in System Settings".into());
                 self.rebuild();
             }
+        }
+
+        #[unsafe(method(installDriver:))]
+        fn install_driver(&self, _sender: Option<&AnyObject>) {
+            self.change_driver(kd_sys::driver_install::install, true);
+        }
+
+        #[unsafe(method(uninstallDriver:))]
+        fn uninstall_driver(&self, _sender: Option<&AnyObject>) {
+            self.change_driver(kd_sys::driver_install::uninstall, false);
         }
 
         #[unsafe(method(restartApp:))]
@@ -696,6 +706,10 @@ define_class!(
             // needs stepping from here rather than from the first click; the
             // same timer is what notices the user changing output device.
             self.start_ticking();
+
+            // Last, because it is modal: everything above has to be in place
+            // before the app stops to ask a question.
+            self.offer_driver_install();
         }
 
         #[unsafe(method(applicationWillTerminate:))]
@@ -726,6 +740,97 @@ define_class!(
 impl AppDelegate {
     fn service(&self) -> Option<&RefCell<Service>> {
         self.ivars().service.get()
+    }
+
+    /// Runs a privileged driver change and reports the outcome where the user
+    /// is looking. `installed` is the state being moved to, which is what the
+    /// wait afterwards is waiting for.
+    ///
+    /// The panel is rebuilt because this decides whether the equaliser's
+    /// switches are offered at all.
+    fn change_driver(
+        &self,
+        change: fn() -> Result<(), kd_sys::driver_install::Error>,
+        installed: bool,
+    ) {
+        use kd_sys::driver_install::Error;
+
+        let message = match change() {
+            Ok(()) => {
+                if let Some(sound) = self.sound() {
+                    let mut sound = sound.borrow_mut();
+                    sound.await_driver(installed);
+                    // A driver removed on purpose should not be offered again
+                    // at the next launch; one installed clears the refusal, so
+                    // a later disappearance is worth asking about.
+                    sound.set_driver_prompt_declined(!installed);
+                }
+                Some(if installed {
+                    "Audio driver installed".to_string()
+                } else {
+                    "Audio driver removed".to_string()
+                })
+            }
+            // Dismissing the authorisation dialog is an answer, not a failure.
+            Err(Error::Cancelled) => return,
+            Err(error) => Some(error.to_string()),
+        };
+
+        let mut state = self.ivars().state.borrow_mut();
+        if state.route == Route::Settings {
+            state.settings_notice = message;
+        } else {
+            state.sound_notice = message;
+        }
+        drop(state);
+        self.rebuild();
+    }
+
+    /// Offers to install the bundled driver, once, at launch.
+    ///
+    /// Without the plug-in the equaliser cannot do anything at all, and the app
+    /// is carrying the copy it needs — so the alternative to asking is a menu
+    /// bar icon whose main feature is greyed out for no visible reason. A
+    /// refusal is remembered, and Settings keeps the offer available.
+    fn offer_driver_install(&self) {
+        let state = kd_sys::driver_install::state();
+        if !state.needs_install() {
+            return;
+        }
+        let declined = self
+            .sound()
+            .is_some_and(|sound| sound.borrow().driver_prompt_declined());
+        // An update is a different offer from the one that was refused.
+        if declined && matches!(state, kd_sys::driver_install::State::NotInstalled) {
+            return;
+        }
+
+        let updating = matches!(state, kd_sys::driver_install::State::Outdated { .. });
+        let mtm = self.mtm();
+        let alert = NSAlert::new(mtm);
+        alert.setMessageText(&NSString::from_str(if updating {
+            "Update the DisEQ audio driver?"
+        } else {
+            "Install the DisEQ audio driver?"
+        }));
+        alert.setInformativeText(&NSString::from_str(
+            "The equaliser and per-app volume work by routing your Mac's audio \
+             through a small audio driver. macOS will ask for your password, \
+             and sound will stop for about a second while it loads.",
+        ));
+        alert.addButtonWithTitle(&NSString::from_str(if updating {
+            "Update"
+        } else {
+            "Install"
+        }));
+        alert.addButtonWithTitle(&NSString::from_str("Later"));
+
+        // The first button added is `NSAlertFirstButtonReturn`.
+        if alert.runModal() == NSAlertFirstButtonReturn {
+            self.change_driver(kd_sys::driver_install::install, true);
+        } else if let Some(sound) = self.sound() {
+            sound.borrow_mut().set_driver_prompt_declined(true);
+        }
     }
 
     fn sound(&self) -> Option<&RefCell<SoundService>> {

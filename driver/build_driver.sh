@@ -8,9 +8,15 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DRIVER="$ROOT/target/DisEQ.driver"
 SOURCE="$ROOT/driver/Source/DisEQ.c"
 
+# shellcheck source=bundle/common.sh
+source "$ROOT/bundle/common.sh"
+
 rm -rf "$DRIVER"
 mkdir -p "$DRIVER/Contents/MacOS"
 cp "$ROOT/driver/Info.plist" "$DRIVER/Contents/Info.plist"
+# The version the app compares against to decide whether an installed plug-in
+# is the one it carries, so it has to come from the same place as the app's.
+stamp_version "$DRIVER/Contents/Info.plist" "$(diseq_version "$ROOT")"
 
 # A HAL plug-in is a Mach-O bundle, not a dylib: coreaudiod loads it with
 # CFBundle. Both architectures, because coreaudiod's is not ours to choose.

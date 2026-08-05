@@ -1,0 +1,87 @@
+name: release
+
+# Cutting a release is pushing a tag. Everything below is what `make dmg` does
+# locally, so a release can be reproduced by hand when the runner is not an
+# option.
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  dmg:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Add the release targets
+        run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
+
+      - uses: Swatinem/rust-cache@v2
+
+      # A tag that disagrees with the version in the bundle is a release nobody
+      # can identify later, so it fails here rather than after publishing.
+      - name: Check the tag against the workspace version
+        run: |
+          source bundle/common.sh
+          version="$(diseq_version "$PWD")"
+          tag="${GITHUB_REF_NAME#v}"
+          if [ "$tag" != "$version" ]; then
+            echo "tag $GITHUB_REF_NAME does not match workspace version $version" >&2
+            exit 1
+          fi
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+
+      # Not the integration tests: `kd-audio`'s offline EQ checks drive AVAudio
+      # and need a Core Audio state a runner cannot be relied on to have.
+      - name: Test
+        run: |
+          cargo clippy --workspace --all-targets -- -D warnings
+          cargo test --workspace --lib --bins
+
+      - name: Build the disk image
+        run: make dmg
+
+      # The bundle only works if it is signed, and the runner signs ad hoc.
+      - name: Verify the bundle
+        run: codesign --verify --deep --strict --verbose=2 target/DisEQ.app
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: DisEQ-${{ env.VERSION }}.dmg
+          path: target/DisEQ-${{ env.VERSION }}.dmg
+
+      - name: Publish the release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Ad-hoc signed, so Gatekeeper quarantines the download. Saying so in
+          # the release notes is the difference between a first run and a bug
+          # report about a damaged app.
+          cat > notes.md <<'NOTES'
+          ## Install
+
+          1. Open the disk image and drag **DisEQ** to Applications.
+          2. DisEQ is not signed with an Apple Developer ID, so macOS refuses
+             to open it until the download flag is cleared:
+
+             ```sh
+             xattr -dr com.apple.quarantine /Applications/DisEQ.app
+             ```
+
+          3. Launch DisEQ. It offers to install its audio driver and asks for
+             your password; audio stops for about a second while the driver
+             loads. The offer stays available under Settings.
+
+          Uninstall the driver from Settings before deleting the app.
+          NOTES
+          gh release create "$GITHUB_REF_NAME" \
+            "target/DisEQ-$VERSION.dmg" \
+            --title "DisEQ $VERSION" \
+            --notes-file notes.md \
+            --generate-notes

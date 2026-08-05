@@ -39,6 +39,11 @@ const SETTLE_TICKS: u32 = 30;
 /// is imperceptible and the file is written on the way out anyway.
 const SAVE_TICKS: u32 = 30;
 
+/// How long to wait for a freshly installed plug-in to show up, in 100 ms
+/// steps. Installing restarts coreaudiod, and the HAL takes a moment to come
+/// back and load what is now in its directory.
+const DRIVER_WAIT_STEPS: u32 = 40;
+
 /// The part of a device poll the Sound card draws, sampled either side of
 /// [`SoundService::follow_system_output`] so a poll can say whether the panel
 /// has anything new to show.
@@ -81,7 +86,7 @@ impl Availability {
 
     /// Why the equaliser cannot be switched on, if it cannot.
     pub fn eq_blocked(&self) -> Option<String> {
-        (!self.driver).then(|| "Driver not installed — run 'make driver-install'".to_string())
+        (!self.driver).then(|| "Audio driver not installed".to_string())
     }
 
     /// Why the App Mixer cannot be switched on, if it cannot.
@@ -250,6 +255,35 @@ impl SoundService {
 
     pub fn availability(&self) -> &Availability {
         &self.availability
+    }
+
+    /// Waits for a driver that has just been installed or removed to take
+    /// effect, then re-reads what the machine offers.
+    ///
+    /// Without the wait, a panel rebuilt straight after an install still
+    /// reports the driver as missing: coreaudiod has been restarted and has not
+    /// finished loading the plug-in yet.
+    pub fn await_driver(&mut self, installed: bool) {
+        for _ in 0..DRIVER_WAIT_STEPS {
+            if devices::driver_is_installed() == installed {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        self.refresh();
+    }
+
+    /// Whether the offer to install the audio driver has already been declined.
+    pub fn driver_prompt_declined(&self) -> bool {
+        self.config.driver_prompt_declined
+    }
+
+    pub fn set_driver_prompt_declined(&mut self, declined: bool) {
+        if self.config.driver_prompt_declined != declined {
+            self.config.driver_prompt_declined = declined;
+            self.dirty = true;
+            self.save();
+        }
     }
 
     /// The device name to show in the header: what the user is actually

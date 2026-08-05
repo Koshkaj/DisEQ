@@ -2,7 +2,7 @@ APP := target/DisEQ.app
 BIN := DisEQ
 
 .DEFAULT_GOAL := help
-.PHONY: help build release check test fmt lint app app-release run stop probe reconnect ddc backends selftest audio-probe eq-probe driver driver-install driver-uninstall driver-probe route mixer clean mirror-probe
+.PHONY: help build release check test fmt lint app app-release dmg icon run stop probe reconnect ddc backends selftest audio-probe eq-probe driver driver-install driver-uninstall driver-probe route mixer clean mirror-probe
 
 help: ## Show this help
 	@grep -hE '^[a-z-]+:.*?## ' $(MAKEFILE_LIST) \
@@ -36,8 +36,14 @@ lint: ## Run clippy over the workspace
 app: ## Build DisEQ.app (debug) and ad-hoc sign it
 	./bundle/build_app.sh
 
-app-release: ## Build DisEQ.app (release) and ad-hoc sign it
+app-release: ## Build DisEQ.app (release, universal) and ad-hoc sign it
 	./bundle/build_app.sh release
+
+dmg: ## Build the release disk image, the way it ships
+	./bundle/build_dmg.sh
+
+icon: ## Regenerate bundle/DisEQ.icns from images/logo.png (needs Pillow)
+	./bundle/make_icon.sh
 
 run: app ## Rebuild the bundle, restart the app, leave it in the menu bar
 	@pkill -f $(BIN) 2>/dev/null || true

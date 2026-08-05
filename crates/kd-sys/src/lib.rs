@@ -3,6 +3,7 @@ pub mod brightness;
 pub mod config;
 pub mod ddc;
 pub mod display;
+pub mod driver_install;
 pub mod dylib;
 pub mod gamma;
 pub mod iokit;

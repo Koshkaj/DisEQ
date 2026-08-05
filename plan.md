@@ -3,9 +3,7 @@
 A macOS status-bar widget in Rust, UI written directly against AppKit via `objc2`, with two
 sections: **Displays** (functional) and **Sound** (greyed placeholder).
 
-Companion documents: [`technical_docs.md`](./technical_docs.md) — UI decomposition and the
-full system-API mapping; [`sound_plan.md`](./sound_plan.md) — the EQ and App Mixer. This file
-covers *what we build, in what order*.
+This file covers *what we build, in what order*.
 
 ---
 
