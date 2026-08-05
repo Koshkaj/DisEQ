@@ -41,6 +41,13 @@
 | Launch at Login | Via the public `SMAppService` API, with a shortcut to Login Items when macOS wants approval. |
 | Native and small | Rust directly against AppKit — roughly 14–16 MB idle and 0.0% idle CPU. See [PERFORMANCE.md](PERFORMANCE.md). |
 
+## Screenshots
+
+<p align="center">
+  <img src="images/monitor_example.png" alt="Display controls" width="400">
+  <img src="images/sound_example.png" alt="Sound equaliser" width="400">
+</p>
+
 ## Install
 
 Download `DisEQ-<version>.dmg` from
