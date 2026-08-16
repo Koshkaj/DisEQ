@@ -134,7 +134,13 @@ fn registry() -> &'static Mutex<HashMap<u32, Offline>> {
 }
 
 pub fn record(display: &Display, strategy: Strategy) {
-    let entry = Offline::from_display(display, strategy);
+    insert(Offline::from_display(display, strategy));
+}
+
+/// Files an already-built record. Separate from [`record`] so a caller that has
+/// an identity but no live display — a probe, or a record being replayed — does
+/// not have to invent one.
+pub fn insert(entry: Offline) {
     if let Ok(mut map) = registry().lock() {
         map.insert(entry.id.0, entry);
         write_file(&map);

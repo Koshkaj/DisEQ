@@ -34,6 +34,10 @@ fn describe(error: kd_sys::power::PowerError) -> String {
     match error {
         PowerError::LastActiveDisplay => "Cannot disconnect the only active display".to_string(),
         PowerError::NoMirrorTarget => "No other display to mirror onto".to_string(),
+        PowerError::NotAttached => "Nothing is plugged into this display's port".to_string(),
+        PowerError::LidClosed => {
+            "The built-in display stays off while the lid is closed".to_string()
+        }
         PowerError::Unavailable => "Disconnect is unavailable on this macOS build".to_string(),
         PowerError::Failed => "The system refused the change".to_string(),
     }
@@ -58,6 +62,14 @@ struct Ivars {
     /// Drives preset ramps and the route's drift controller. Held so it can be
     /// invalidated; a repeating timer with no owner runs until the app quits.
     ticker: RefCell<Option<Retained<NSTimer>>>,
+    /// Watches for displays that are plugged in and dark. Separate from
+    /// `ticker`, which stops whenever the sound side has nothing to do — a
+    /// monitor being plugged back in is not something that can be allowed to go
+    /// unnoticed because no audio is playing.
+    watchdog: RefCell<Option<Retained<NSTimer>>>,
+    /// The displays the watchdog last saw online, so a hotplug redraws a panel
+    /// that is already open.
+    online: RefCell<Vec<u32>>,
 }
 
 /// Rows carry their identity in the view tag; anything else is not a row.
@@ -454,6 +466,32 @@ define_class!(
             }
         }
 
+        /// Notices displays that are plugged in but dark, and redraws an open
+        /// panel when the set of displays changes.
+        ///
+        /// Polled rather than driven by `CGDisplayRegisterReconfigurationCallback`,
+        /// because the case that matters is a display CoreGraphics does not
+        /// consider to exist: a disabled port publishes no reconfiguration when
+        /// a monitor is plugged into it, so waiting for one waits forever.
+        #[unsafe(method(watchDisplays:))]
+        fn watch_displays(&self, _sender: Option<&AnyObject>) {
+            // Off the main thread, and only when there is something to do — the
+            // transactions block for as long as the window server takes.
+            kd_core::power::recover_orphaned_panels_async();
+
+            let online: Vec<u32> = kd_sys::display::online_displays()
+                .into_iter()
+                .map(|id| id.0)
+                .collect();
+            if *self.ivars().online.borrow() == online {
+                return;
+            }
+            *self.ivars().online.borrow_mut() = online;
+            if self.panel_is_visible() {
+                self.rebuild();
+            }
+        }
+
         #[unsafe(method(resolutionPreview:))]
         fn resolution_preview(&self, sender: Option<&AnyObject>) {
             let Some(control) = control(sender) else { return };
@@ -486,7 +524,7 @@ define_class!(
 
             let mut failure = None;
             self.with_display(index, |service, display| {
-                if let Err(error) = service.set_connected(display.id(), wants_connected) {
+                if let Err(error) = service.set_connected(display, wants_connected) {
                     failure = Some(describe(error));
                 } else if !wants_connected {
                     self.ivars().state.borrow_mut().collapse(index);
@@ -706,6 +744,9 @@ define_class!(
             // needs stepping from here rather than from the first click; the
             // same timer is what notices the user changing output device.
             self.start_ticking();
+            // A display can be plugged in while the panel is shut and the sound
+            // side is idle, so this timer runs for the life of the app.
+            self.start_watching_displays();
 
             // Last, because it is modal: everything above has to be in place
             // before the app stops to ask a question.
@@ -872,6 +913,29 @@ impl AppDelegate {
         }
     }
 
+    /// How often to look for a monitor that has been plugged into a port the
+    /// window server still has switched off. Slow: it is a plug-in-a-cable
+    /// event, and the check walks the IORegistry.
+    const WATCHDOG_SECONDS: f64 = 3.0;
+
+    fn start_watching_displays(&self) {
+        if self.ivars().watchdog.borrow().is_some() {
+            return;
+        }
+        // SAFETY: the timer targets this delegate, which lives as long as the
+        // application.
+        let timer = unsafe {
+            NSTimer::scheduledTimerWithTimeInterval_target_selector_userInfo_repeats(
+                Self::WATCHDOG_SECONDS,
+                self,
+                sel!(watchDisplays:),
+                None,
+                true,
+            )
+        };
+        *self.ivars().watchdog.borrow_mut() = Some(timer);
+    }
+
     /// Whether the click being handled asked for a context menu.
     fn is_secondary_click(&self) -> bool {
         let Some(event) = NSApplication::sharedApplication(self.mtm()).currentEvent() else {
@@ -990,6 +1054,10 @@ impl AppDelegate {
         // A display that was off when the backends were probed has none, so a
         // reconnected one would show a dead brightness slider until restart.
         service.borrow_mut().refresh_if_stale();
+        // Opening the panel is the other moment a monitor plugged into a
+        // switched-off port should come back, rather than waiting out the
+        // watchdog's interval.
+        kd_core::power::recover_orphaned_panels_async();
 
         let catalog = DisplayCatalog::load();
         *self.ivars().catalog.borrow_mut() = Some(catalog.clone());

@@ -9,6 +9,7 @@ pub mod gamma;
 pub mod iokit;
 pub mod login_item;
 pub mod night_shift;
+pub mod panel;
 pub mod power;
 pub mod timeout;
 pub mod watch;

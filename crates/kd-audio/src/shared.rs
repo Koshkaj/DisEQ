@@ -293,6 +293,26 @@ mod tests {
         );
     }
 
+    /// The driver's volume control is a control surface, not a gain stage: the
+    /// app reads it and applies it on the way to the hardware. A driver that
+    /// also applies it to the ring multiplies the two, and at a low setting the
+    /// product is inaudible — which reads as "the EQ broke my volume" rather
+    /// than as a bug in either half on its own.
+    #[test]
+    fn the_driver_hands_over_the_mix_unattenuated() {
+        let write = DRIVER
+            .lines()
+            .map(str::trim)
+            .find(|line| line.starts_with("gSharedSamples[") && line.contains('='))
+            .expect("driver/Source/DisEQ.c still writes into gSharedSamples");
+
+        assert!(
+            !write.contains("gain"),
+            "the driver applies volume to the shared ring ({write:?}); \
+             the app applies it too, so the two multiply"
+        );
+    }
+
     #[test]
     fn the_header_matches_the_c_struct_field_for_field() {
         // Same order, same widths: the reader casts the mapping straight to

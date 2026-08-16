@@ -33,12 +33,31 @@ extern "C" {
         allocator: *const c_void,
         options: u32,
     ) -> *const CFType;
+    fn IORegistryEntryCreateCFProperty(
+        entry: IoService,
+        key: *const CFString,
+        allocator: *const c_void,
+        options: u32,
+    ) -> *const CFType;
     fn IORegistryEntryGetParentEntry(
         entry: IoService,
         plane: *const c_char,
         parent: *mut IoService,
     ) -> i32;
     fn IOObjectRetain(object: IoObject) -> i32;
+}
+
+/// Reads `key` from `service` itself, without searching the tree.
+///
+/// The searching variants climb or descend until they find a match, which for a
+/// property every display node publishes means the first answer may belong to a
+/// different display. Where the node is already the right one, this asks it
+/// directly.
+pub fn property(service: IoService, key: &str) -> Option<CFRetained<CFType>> {
+    let key = CFString::from_str(key);
+    let value = unsafe { IORegistryEntryCreateCFProperty(service, &*key, std::ptr::null(), 0) };
+    // IORegistryEntryCreateCFProperty follows the Create rule.
+    Some(unsafe { CFRetained::from_raw(std::ptr::NonNull::new(value.cast_mut())?) })
 }
 
 /// Iterates every IORegistry service matching `class_name`.

@@ -2,7 +2,7 @@ APP := target/DisEQ.app
 BIN := DisEQ
 
 .DEFAULT_GOAL := help
-.PHONY: help build release check test fmt lint app app-release dmg icon run stop probe reconnect ddc backends selftest audio-probe eq-probe driver driver-install driver-uninstall driver-probe route mixer clean mirror-probe
+.PHONY: help build release check test fmt lint app app-release dmg icon run stop probe reconnect ddc backends attach-probe guard-probe selftest audio-probe volume-probe eq-probe driver driver-install driver-uninstall driver-probe route mixer clean mirror-probe
 
 help: ## Show this help
 	@grep -hE '^[a-z-]+:.*?## ' $(MAKEFILE_LIST) \
@@ -81,11 +81,25 @@ ddc: ## Read-only DDC/CI probe over the worker thread. Writes nothing.
 backends: ## Report which backend drives each control on this machine
 	cargo run -p kd-core --example backends
 
+attach-probe: ## Compare CoreGraphics, the window server and IOKit on what is plugged in
+	cargo run -q -p kd-core --example attach_probe
+
+# Writes offline records, so it is pointed at a scratch home rather than yours.
+# It switches a secondary display off and back on, which flashes the screens.
+guard-probe: ## Check the reconnect guards: absent hardware, the lid, the blind sweep
+	@cargo build -q -p kd-core --example guard_probe
+	@HOME="$$(mktemp -d)" ./target/debug/examples/guard_probe
+
 selftest: ## Exercise every backend end to end, restoring what it changes
 	cargo run -p kd-core --example selftest
 
 audio-probe: ## List output devices and whether their volume is actually settable
 	cargo run -p kd-core --example audio_probe
+
+# Takes the default output for about ten seconds. Inaudible: the virtual device
+# has no hardware behind it, so the tone it measures never reaches a speaker.
+volume-probe: ## Check the driver hands the app its audio unattenuated (needs the driver)
+	cargo run -q -p kd-audio --example volume_probe
 
 # Renders offline, so it neither needs nor disturbs a real output device.
 # Any preset id works, and --auto-preamp shows the gain-staged version:

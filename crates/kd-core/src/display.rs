@@ -111,8 +111,20 @@ impl DisplayCatalog {
                 // Still in the layout, just mirrored: the card is already there.
                 Some(_) => {}
                 // Off the device tree. Without a card built from the record,
-                // the toggle that brings it back would not exist.
-                None => displays.push(entry.ghost()),
+                // the toggle that brings it back would not exist — but only
+                // while there is still something to bring back. A display that
+                // was switched off and then unplugged has no hardware behind
+                // its record any more, and a card offering to reconnect it
+                // offers to invent a monitor.
+                None => match kd_sys::panel::attachment_for(
+                    entry.is_builtin,
+                    entry.vendor,
+                    entry.model,
+                    entry.serial,
+                ) {
+                    kd_sys::panel::Attachment::Absent => crate::offline::forget(entry.id),
+                    _ => displays.push(entry.ghost()),
+                },
             }
         }
 

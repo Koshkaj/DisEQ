@@ -101,7 +101,7 @@ fn main() {
         // With one display attached this must refuse rather than black the
         // machine, so the refusal is the passing outcome.
         if catalog.displays.len() == 1 {
-            let result = service.set_connected(id, false);
+            let result = service.set_connected(display, false);
             check(
                 &format!("disconnect refused on last display ({result:?})"),
                 result.is_err(),

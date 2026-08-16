@@ -184,7 +184,10 @@ impl Route {
                 input_rate,
                 Arc::clone(&bridge),
                 Arc::clone(&shared),
-                volume,
+                // Unity. Where the master volume belongs is `apply_volume`'s
+                // decision, and it is made below once the route exists — this
+                // stage starts out of the way rather than guessing.
+                1.0,
                 &settings,
             )?;
             Ok((shared, playback))
@@ -201,7 +204,7 @@ impl Route {
             }
         };
 
-        Ok(Self {
+        let mut route = Self {
             playback,
             shared,
             bridge,
@@ -215,7 +218,13 @@ impl Route {
             rate,
             settings,
             level: 0.0,
-        })
+        };
+        // Stage the volume through the one place that knows where it belongs,
+        // rather than leaving the mixer holding a copy of a gain the hardware is
+        // already applying. Turning the effects on must not change how loud the
+        // machine is.
+        route.apply_volume(volume, true);
+        Ok(route)
     }
 
     pub fn target(&self) -> &Device {
@@ -319,6 +328,24 @@ impl Route {
     /// The master volume, wherever it is currently being applied.
     pub fn volume(&self) -> f32 {
         self.device_volume
+    }
+
+    /// The two places a gain can be applied on the way out: our own mixer, and
+    /// the hardware's volume control where it has one.
+    ///
+    /// Their product is what the user hears, and it should equal [`Self::volume`]
+    /// exactly — the volume is applied at one stage or the other, never both.
+    /// Exposed because "applied twice" is inaudible as a bug and obvious as a
+    /// number: it was applied twice across the driver boundary for a while, and
+    /// at a low setting the product was silence.
+    pub fn gain_stages(&self) -> (f32, Option<f64>) {
+        (
+            self.playback.volume(),
+            self.target
+                .volume_is_settable
+                .then(|| audio::volume(self.target.id))
+                .flatten(),
+        )
     }
 
     pub fn is_running(&self) -> bool {

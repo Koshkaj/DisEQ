@@ -41,6 +41,12 @@ pub enum PowerError {
     LastActiveDisplay,
     /// Refused: mirroring needs somewhere to mirror to.
     NoMirrorTarget,
+    /// Refused: nothing is plugged into it. Enabling a display the machine
+    /// cannot see does not fail — it fabricates one, and the port is left in a
+    /// state a real monitor plugged in afterwards does not recover from.
+    NotAttached,
+    /// Refused: it is the built-in panel and the lid is shut.
+    LidClosed,
     /// The private symbol is not present on this macOS build.
     Unavailable,
     /// The system rejected the change or the transaction timed out.
@@ -149,34 +155,109 @@ pub fn is_connected(display: DisplayId) -> bool {
     snapshot.is_active && snapshot.mirrors.is_none()
 }
 
+/// Which step of the transaction failed, and what it returned.
+///
+/// `None` means the transaction did not report back inside the timeout, which
+/// is not the same as a refusal.
+pub type TransactionFailure = Option<(&'static str, i32)>;
+
+/// Whether the display list has taken the change, which is the only trustworthy
+/// answer. Observed at a few milliseconds on this hardware, so the ceiling is
+/// generous rather than tuned.
+const OBSERVE_TIMEOUT: Duration = Duration::from_millis(2_500);
+const OBSERVE_STEP: Duration = Duration::from_millis(20);
+
+/// Enables or disables a display, and reports what the system actually did.
+///
+/// **The transaction's own status is not the answer.** On this hardware —
+/// macOS 26, Apple Silicon — `CGCompleteDisplayConfiguration` returns
+/// `kCGErrorFailure` (1001) for a disable that goes through in under a
+/// millisecond, and an enable does not report back inside ten seconds despite
+/// the display appearing in three. Believing either reading meant a working
+/// disconnect looked like a failure and fell through to the mirror fallback,
+/// and a working reconnect was reported to the user as refused.
+///
+/// So the transaction is started and then the display list is watched. That is
+/// the state everything downstream reads anyway.
 fn set_enabled(display: DisplayId, enabled: bool) -> Result<(), PowerError> {
-    let Some(configure) = configure_display_enabled() else {
+    if configure_display_enabled().is_none() {
         return Err(PowerError::Unavailable);
-    };
+    }
 
-    let ok = run_with_timeout(TRANSACTION_TIMEOUT, false, move || {
-        let mut config: CGDisplayConfigRef = std::ptr::null_mut();
-        if unsafe { CGBeginDisplayConfiguration(&mut config) } != CGError::Success {
-            return false;
-        }
-        if unsafe { configure(config, display.0, enabled) } != CGError::Success {
-            unsafe { CGCancelDisplayConfiguration(config) };
-            return false;
-        }
-        // Session scope, never permanent: a disconnect that survives reboot
-        // could leave the machine with no usable display at login.
-        let completed =
-            unsafe { CGCompleteDisplayConfiguration(config, CGConfigureOption::ForSession) };
-        if completed != CGError::Success {
-            unsafe { CGCancelDisplayConfiguration(config) };
-            return false;
-        }
-        true
-    });
-
-    if ok {
+    begin_set_enabled(display, enabled);
+    if wait_until_listed(display, enabled, OBSERVE_TIMEOUT) {
         Ok(())
     } else {
         Err(PowerError::Failed)
+    }
+}
+
+/// Starts the transaction without waiting for it to report back.
+///
+/// Abandoned rather than cancelled, for the same reason [`run_with_timeout`]
+/// abandons: the call can sit in WindowServer IPC long after the change it
+/// asked for has landed, and nothing useful comes of blocking on it.
+pub fn begin_set_enabled(display: DisplayId, enabled: bool) {
+    std::thread::spawn(move || {
+        let _ = transaction(display, enabled);
+    });
+}
+
+/// Runs the transaction and reports where it went wrong, for probes.
+///
+/// Only diagnostics read this. Everything that has to decide something reads
+/// the display list instead — see [`set_enabled`].
+pub fn set_enabled_detailed(display: DisplayId, enabled: bool) -> Result<(), TransactionFailure> {
+    if configure_display_enabled().is_none() {
+        return Err(Some(("unavailable", 0)));
+    }
+    match run_with_timeout(TRANSACTION_TIMEOUT, None, move || {
+        Some(transaction(display, enabled))
+    }) {
+        Some(Ok(())) => Ok(()),
+        Some(Err(step)) => Err(Some(step)),
+        None => Err(None),
+    }
+}
+
+fn transaction(display: DisplayId, enabled: bool) -> Result<(), (&'static str, i32)> {
+    let Some(configure) = configure_display_enabled() else {
+        return Err(("unavailable", 0));
+    };
+
+    let mut config: CGDisplayConfigRef = std::ptr::null_mut();
+    let begun = unsafe { CGBeginDisplayConfiguration(&mut config) };
+    if begun != CGError::Success {
+        return Err(("CGBeginDisplayConfiguration", begun.0));
+    }
+    let configured = unsafe { configure(config, display.0, enabled) };
+    if configured != CGError::Success {
+        unsafe { CGCancelDisplayConfiguration(config) };
+        return Err(("CGSConfigureDisplayEnabled", configured.0));
+    }
+    // Session scope, never permanent: a disconnect that survives reboot could
+    // leave the machine with no usable display at login.
+    let completed =
+        unsafe { CGCompleteDisplayConfiguration(config, CGConfigureOption::ForSession) };
+    if completed != CGError::Success {
+        // Deliberately not cancelled: completing consumes the configuration
+        // whatever it returns, and this one returns an error on a change it has
+        // already applied.
+        return Err(("CGCompleteDisplayConfiguration", completed.0));
+    }
+    Ok(())
+}
+
+/// Waits for the display list to agree that `display` is or is not there.
+fn wait_until_listed(display: DisplayId, wanted: bool, limit: Duration) -> bool {
+    let deadline = std::time::Instant::now() + limit;
+    loop {
+        if display::online_displays().contains(&display) == wanted {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(OBSERVE_STEP);
     }
 }

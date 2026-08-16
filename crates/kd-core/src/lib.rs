@@ -1,6 +1,7 @@
 pub mod ddc;
 pub mod display;
 pub mod offline;
+pub mod power;
 pub mod protection;
 pub mod service;
 

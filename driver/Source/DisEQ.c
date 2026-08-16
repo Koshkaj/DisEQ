@@ -14,9 +14,15 @@
 //  the vtable, the property dispatch, the zero-timestamp arithmetic) and the
 //  loopback specifics follow eqMac's driver, Copyright © Bitgapp Ltd, Apache
 //  License 2.0 — https://github.com/bitgapp/eqMac, v1.3.2. Changed: ported
-//  Swift → C; the mutex in the IO path is replaced with atomics, volume is
-//  applied here rather than in the app, and gain changes are ramped per sample
-//  so a slider drag does not zipper.
+//  Swift → C; the mutex in the IO path is replaced with atomics, and gain
+//  changes are ramped per sample so a slider drag does not zipper.
+//
+//  The volume control published here is a control surface rather than a gain
+//  stage. The menu bar and the volume keys write to it, the app reads it, and
+//  the app applies it on the way to the hardware — at the hardware's own volume
+//  control when it has one, so the gain happens as late as possible. Only the
+//  loopback input stream, which nothing in this project reads, is attenuated
+//  here; the shared ring the app reads carries the mix untouched.
 //
 
 #include <CoreAudio/AudioServerPlugIn.h>
@@ -2007,14 +2013,21 @@ static OSStatus kd_DoIOOperation(AudioServerPlugInDriverRef inDriver,
 
                 for (UInt32 channel = 0; channel < kChannelCount; channel++) {
                     UInt32 source = frame * kChannelCount + channel;
-                    Float32 sample = samples[source] * gain;
-                    gRingBuffer[writePosition * kChannelCount + channel] += sample;
+                    Float32 raw = samples[source];
+                    gRingBuffer[writePosition * kChannelCount + channel] += raw * gain;
                     gRingBuffer[clearPosition * kChannelCount + channel] = 0.0f;
                     if (gSharedSamples != NULL) {
+                        // Unattenuated, and deliberately so. This volume control
+                        // is a control surface, not a gain stage: the app reads
+                        // it and applies it on the way to the hardware, at the
+                        // hardware's own volume control where there is one.
+                        // Applying it here as well multiplied the two, and at a
+                        // low setting the product is inaudible.
+                        //
                         // Assigned, not accumulated: the app is the only reader
                         // and it reads each frame once, so there is nothing to
                         // mix with and nothing to clear behind.
-                        gSharedSamples[writePosition * kChannelCount + channel] = sample;
+                        gSharedSamples[writePosition * kChannelCount + channel] = raw;
                     }
                 }
             }

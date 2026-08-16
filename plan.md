@@ -300,6 +300,48 @@ DELL U2720Q   backend: Software
   record falls back to the same sweep.
 - Disconnects use session scope, never permanent: one that survived a reboot could leave
   the machine with no usable display at login.
+- **A reconnect is refused when there is nothing to reconnect.**
+  `CGSConfigureDisplayEnabled` does not fail on a port with nothing plugged into it: it
+  succeeds, and the window server invents a display that takes windows and leaves the port
+  in a state a real monitor plugged in afterwards comes up "No Signal" on. CoreGraphics
+  cannot tell the two apart — a disabled display and an unplugged one are both simply
+  missing from `CGGetOnlineDisplayList` — so `kd_sys::panel` reads EDID out of the
+  IORegistry instead (`AppleCLCD2` → `DisplayAttributes` → `ProductAttributes`). Only a
+  panel on the other end of the cable produces that, and it survives the display being
+  disabled, so "switched off" and "unplugged" are finally distinguishable. A record whose
+  panel is gone loses its card rather than keeping a toggle that would invent one.
+- **The built-in panel stays dark while the lid is shut.** The private enable call sits
+  below whatever normally enforces that, so `AppleClamshellState` on `IOPMrootDomain` is
+  checked before it, and again after any blind sweep.
+- **A monitor plugged back into a port that was switched off comes back on its own.**
+  The window server's disable belongs to the port, not to the panel that was on it, so it
+  outlives the cable being pulled: switch a display off, unplug it, plug it back in, and it
+  stays dark forever. Its record is gone by then — dropped when the panel it described
+  disappeared, which is what stops the card offering to invent a monitor — so nothing is
+  left to press either. `power::orphaned_panels` names that state (attached, dark, and no
+  record explaining why) and a watchdog recovers it. A display the user switched off keeps
+  its record and is left alone; only hardware that is dark for no reason anyone chose is
+  touched. Each panel is retried once per appearance, and the pass runs on a worker thread
+  because the transactions block for as long as the window server takes.
+  Polled, not driven by `CGDisplayRegisterReconfigurationCallback`: the display in question
+  is one CoreGraphics does not believe exists, so plugging a monitor into that port
+  publishes no reconfiguration to wait for.
+- Where the registry cannot be read at all, every one of those checks reports `Unknown` and
+  allows the operation. A machine this code does not recognise keeps its old behaviour
+  rather than losing the feature.
+
+### The display transactions lie about their own outcome
+
+On this hardware `CGSConfigureDisplayEnabled` reports failure for changes it applies:
+a disable returns `kCGErrorFailure` (1001) from `CGCompleteDisplayConfiguration` in under a
+millisecond, and an enable does not report back inside ten seconds — while the display list
+reflects both within three. Believing the status meant a working disconnect looked like a
+failure and fell through to the mirror fallback, and a working reconnect was reported to the
+user as refused.
+
+So `power::set_enabled` starts the transaction and then watches
+`CGGetOnlineDisplayList`, which is the state everything downstream reads anyway.
+`set_enabled_detailed` still reports which step returned what, for probes only.
 - Backends are re-resolved whenever the layout changes. Which mechanism drives a display's
   brightness is decided by what answered at probe time, so a display that was off then had
   no backend for the rest of the session — a reconnected monitor came back with a dead
@@ -310,6 +352,17 @@ DELL U2720Q   backend: Software
 - The panel body lives in an `NSScrollView` and grows only to the screen's usable height:
   two unfolded display cards are taller than the screen, and the overflow used to be
   unreachable.
+- **The master volume is applied at exactly one stage.** Turning the effects on must not
+  change how loud the machine is, and it did — twice over, for two separate reasons. The
+  driver applied its volume control to the shared ring the app reads and the app applied it
+  again on the way out, so a cubic taper met a linear one and half volume came out at a
+  sixteenth. And `Route::start` seeded the playback mixer with the master volume while
+  adopting that same volume *from* the hardware, which kept applying it too — so every
+  route came up quiet and stayed quiet until the user touched the slider, which
+  unknowingly repaired the staging. The driver's control is now a control surface only,
+  and `Route::apply_volume` is the single place that decides where the gain lands:
+  the hardware's own volume control where there is one, our mixer where there is not.
+  `make volume-probe` measures both halves, the second one *as started*.
 - Gamma is reset on quit, since a dimmed ramp outlives the process.
 - Resolution applies on mouse-up, not during the drag.
 - DDC writes are coalesced per display and code, so dragging a slider cannot back up the bus.
@@ -361,13 +414,20 @@ are encoded into view tags.
 ## 8. Architecture crates
 
 ```
-crates/kd-sys      audio, brightness, config, ddc, display, dylib, gamma, iokit, power,
-                   timeout, watch                   — all unsafe FFI lives here
-crates/kd-core     ddc (worker thread), display, offline, protection, service
+crates/kd-sys      audio, brightness, config, ddc, display, dylib, gamma, iokit, panel,
+                   power, timeout, watch            — all unsafe FFI lives here
+crates/kd-core     ddc (worker thread), display, offline, power, protection, service
 crates/kd-app      appkit, main, panel, state, theme, views
 ```
+
+`kd_sys::panel` answers what CoreGraphics cannot: which panels are physically plugged in,
+and whether the lid is shut. `kd_core::power` is the policy over `kd_sys::power` that uses
+those answers to decide whether a reconnect is a recovery or an invention.
 
 Probes, all runnable via `make`:
 `probe` (displays and modes), `ddc` (read-only VCP), `backends` (resolved backends),
 `selftest` (end-to-end, self-restoring), `mirror-probe` (guarded, needs 2 displays),
-`reconnect` (re-enables displays left switched off, including by a previous run).
+`reconnect` (re-enables displays left switched off, including by a previous run),
+`attach-probe` (CoreGraphics vs the window server vs IOKit, read-only),
+`guard-probe` (the reconnect guards, against a scratch home),
+`volume-probe` (that the driver hands the app its audio unattenuated).

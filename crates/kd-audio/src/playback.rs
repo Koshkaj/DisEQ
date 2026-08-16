@@ -102,12 +102,19 @@ impl Playback {
     /// `input_rate` is the virtual device's actual rate. The ratio between the
     /// two is the varispeed rate the controller starts from: if the driver runs
     /// fast, playback has to run fast too or the ring fills up.
+    ///
+    /// `mixer_gain` is the gain for *this* stage, not the master volume. Where
+    /// the two differ is the whole point: hardware with a volume control of its
+    /// own is driven directly and this stays at unity. Seeding it with the
+    /// master volume regardless meant the gain was applied here *and* on the
+    /// hardware, and a route started at 25% came up at 6%. `Route` owns that
+    /// decision — see `Route::apply_volume`.
     pub fn start(
         output: &Device,
         input_rate: f64,
         bridge: Arc<Bridge>,
         shared: Arc<SharedRing>,
-        volume: f32,
+        mixer_gain: f32,
         settings: &Settings,
     ) -> Result<Self, PlaybackError> {
         let sample_rate = output
@@ -164,7 +171,7 @@ impl Playback {
             varispeed.setRate(nominal_rate);
 
             let mixer = engine.mainMixerNode();
-            mixer.setOutputVolume(volume.clamp(0.0, 1.0));
+            mixer.setOutputVolume(mixer_gain.clamp(0.0, 1.0));
 
             let eq = EqUnit::new();
             eq.apply(settings);

@@ -306,11 +306,15 @@ impl Service {
         !offline::is_offline(display) && power::is_connected(display)
     }
 
-    pub fn set_connected(&self, display: DisplayId, connected: bool) -> Result<(), PowerError> {
+    /// Takes the whole display rather than its id: a display that has been
+    /// switched off is not in `CGGetOnlineDisplayList` any more, so its id is
+    /// the one thing about it that cannot be looked up. Reconnecting safely
+    /// needs the identity recorded before it went away.
+    pub fn set_connected(&self, display: &Display, connected: bool) -> Result<(), PowerError> {
         let result = if connected {
             self.reconnect(display)
         } else {
-            self.disconnect(display)
+            self.disconnect(display.id())
         };
         // The DDC handles for a display that just left the layout are stale,
         // and so is the backend map for one that just came back.
@@ -356,24 +360,32 @@ impl Service {
     }
 
     /// Reverses whichever mechanism took the display out.
-    fn reconnect(&self, display: DisplayId) -> Result<(), PowerError> {
-        let strategy = offline::strategy(display).unwrap_or_else(|| {
+    ///
+    /// Refuses outright when there is nothing on the other end of the cable, or
+    /// when it is the built-in panel and the lid is shut. The private enable
+    /// call does not fail in either case — it fabricates a display, and leaves
+    /// the port in a state that survives a real monitor being plugged into it.
+    fn reconnect(&self, display: &Display) -> Result<(), PowerError> {
+        crate::power::may_connect(&display.snapshot)?;
+
+        let id = display.id();
+        let strategy = offline::strategy(id).unwrap_or_else(|| {
             // Not ours: a display sitting in a mirror set was mirrored by
             // something else, anything else answers to the hard disconnect.
-            if display::snapshot(display).mirrors.is_some() {
+            if display::snapshot(id).mirrors.is_some() {
                 Strategy::Mirror
             } else {
                 self.strategy
             }
         });
 
-        if let Err(error) = power::connect(display, strategy) {
+        if let Err(error) = power::connect(id, strategy) {
             // A record written in an earlier session carries that session's id,
             // and the window server hands out new ones on every boot. Rather
-            // than guess which display the stale id meant, enable every display
-            // that is known but not online — they are all off, and the user
-            // just asked for one of them back.
-            if strategy != Strategy::HardDisconnect || !self.enable_all_disabled() {
+            // than guess which display the stale id meant, sweep every display
+            // that is known but not online — the sweep judges each one by what
+            // it produced and undoes the ones that produced nothing real.
+            if strategy != Strategy::HardDisconnect || crate::power::restore_disabled() == 0 {
                 return Err(error);
             }
         }
@@ -382,27 +394,10 @@ impl Service {
             // one from before would send the wake to nothing. Some monitors
             // drop DDC in standby entirely and need their own power button.
             self.ddc.rediscover();
-            self.set_panel_power(display, true);
+            self.set_panel_power(id, true);
         }
-        offline::forget(display);
+        offline::forget(id);
         Ok(())
-    }
-
-    /// Re-enables every display the window server lists but the system does not
-    /// report as online. Returns whether anything came back.
-    fn enable_all_disabled(&self) -> bool {
-        let online = display::online_displays();
-        let mut restored = false;
-        for candidate in power::known_display_ids() {
-            if online.contains(&candidate) {
-                continue;
-            }
-            if power::connect(candidate, Strategy::HardDisconnect).is_ok() {
-                offline::forget(candidate);
-                restored = true;
-            }
-        }
-        restored
     }
 
     /// Undoes every disconnect this app is holding, whichever session made it.
@@ -411,13 +406,21 @@ impl Service {
     /// has changed since, so the card's own toggle may no longer reach it.
     pub fn reconnect_all(&self) -> usize {
         let before = display::online_displays().len();
-        self.enable_all_disabled();
+        crate::power::restore_disabled();
 
         for id in display::online_displays() {
             // Only mirrors this app set: one the user arranged themselves is
             // not something to undo behind their back.
             if display::snapshot(id).mirrors.is_some() && offline::is_offline(id) {
-                let _ = self.reconnect(id);
+                let _ = self.reconnect(&Display::load(id));
+            }
+        }
+
+        // Whatever is in the layout under its own power is not switched off,
+        // whatever a record left over from an earlier session still claims.
+        for id in display::online_displays() {
+            if power::is_connected(id) {
+                offline::forget(id);
             }
         }
 
