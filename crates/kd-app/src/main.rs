@@ -8,6 +8,7 @@ mod views;
 
 use std::cell::{OnceCell, RefCell};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use kd_core::{DisplayCatalog, Service};
 use kd_sys::gamma::Adjustment;
@@ -43,6 +44,51 @@ fn describe(error: kd_sys::power::PowerError) -> String {
     }
 }
 
+/// Flipped by a `CGDisplayRegisterReconfigurationCallback` firing, which can
+/// happen off the main thread — so the callback only ever touches this, and
+/// `reconfigured:` is what turns it into a redraw.
+static DISPLAY_DIRTY: AtomicBool = AtomicBool::new(false);
+
+/// Everything the display cards are drawn from: the displays in the layout, and
+/// the panels plugged in.
+///
+/// Both, because neither implies the other. A display switched off from the
+/// panel is already out of `online` while its card is still on screen — so
+/// pulling its cable moves nothing in the layout, and only `attached` reports
+/// that the card now offers to reconnect a monitor that is not there.
+#[derive(Default, PartialEq, Eq, Debug)]
+struct DisplayState {
+    online: Vec<u32>,
+    /// EDID identity per panel, which is what a card is matched to.
+    attached: Vec<(u32, u32, u32)>,
+}
+
+impl DisplayState {
+    /// Both reads together cost well under a millisecond, the panel walk being
+    /// the cheaper of the two.
+    fn read() -> Self {
+        Self::new(
+            kd_sys::display::online_displays()
+                .into_iter()
+                .map(|id| id.0)
+                .collect(),
+            kd_sys::panel::attached_panels()
+                .into_iter()
+                .map(|panel| (panel.vendor, panel.model, panel.serial))
+                .collect(),
+        )
+    }
+
+    fn new(mut online: Vec<u32>, mut attached: Vec<(u32, u32, u32)>) -> Self {
+        // Compared for equality, and neither enumeration promises an order. One
+        // that came back shuffled would otherwise read as a change and redraw
+        // the panel out from under the pointer.
+        online.sort_unstable();
+        attached.sort_unstable();
+        Self { online, attached }
+    }
+}
+
 fn app_bundle_path() -> Option<std::path::PathBuf> {
     let executable = std::env::current_exe().ok()?;
     let bundle = executable.parent()?.parent()?.parent()?;
@@ -67,9 +113,13 @@ struct Ivars {
     /// monitor being plugged back in is not something that can be allowed to go
     /// unnoticed because no audio is playing.
     watchdog: RefCell<Option<Retained<NSTimer>>>,
-    /// The displays the watchdog last saw online, so a hotplug redraws a panel
-    /// that is already open.
-    online: RefCell<Vec<u32>>,
+    /// What the panel currently on screen was drawn from, so anything that
+    /// moves underneath it redraws it. Written by `rebuild`, which is the only
+    /// thing that can make it true.
+    displays: RefCell<DisplayState>,
+    /// Turns a reconfiguration CoreGraphics already noticed into a redraw,
+    /// without waiting for the watchdog's slower sweep.
+    reconfig: RefCell<Option<Retained<NSTimer>>>,
 }
 
 /// Rows carry their identity in the view tag; anything else is not a row.
@@ -473,21 +523,32 @@ define_class!(
         /// because the case that matters is a display CoreGraphics does not
         /// consider to exist: a disabled port publishes no reconfiguration when
         /// a monitor is plugged into it, so waiting for one waits forever.
+        /// The slow sweep, for the one case nothing reports on its own: a port
+        /// the window server has switched off, which publishes no
+        /// reconfiguration when a monitor is plugged into it.
+        ///
+        /// Redrawing is not its job — a recovered display joins the layout,
+        /// which `reconfigured:` sees like any other hotplug.
         #[unsafe(method(watchDisplays:))]
         fn watch_displays(&self, _sender: Option<&AnyObject>) {
             // Off the main thread, and only when there is something to do — the
             // transactions block for as long as the window server takes.
             kd_core::power::recover_orphaned_panels_async();
+        }
 
-            let online: Vec<u32> = kd_sys::display::online_displays()
-                .into_iter()
-                .map(|id| id.0)
-                .collect();
-            if *self.ivars().online.borrow() == online {
+        /// Redraws an open panel as soon as what it is showing stops being
+        /// true, from whichever direction that happens.
+        #[unsafe(method(reconfigured:))]
+        fn reconfigured(&self, _sender: Option<&AnyObject>) {
+            // Nothing to redraw while it is shut, and opening it rebuilds from
+            // scratch anyway — so the reads below are only paid when they can
+            // change something the user is looking at.
+            if !self.panel_is_visible() {
                 return;
             }
-            *self.ivars().online.borrow_mut() = online;
-            if self.panel_is_visible() {
+            if DISPLAY_DIRTY.load(Ordering::Relaxed)
+                || *self.ivars().displays.borrow() != DisplayState::read()
+            {
                 self.rebuild();
             }
         }
@@ -747,6 +808,9 @@ define_class!(
             // A display can be plugged in while the panel is shut and the sound
             // side is idle, so this timer runs for the life of the app.
             self.start_watching_displays();
+            // Catches everything the watchdog's sweep would otherwise take
+            // seconds to notice: an ordinary plug, unplug, or mode change.
+            self.start_watching_reconfiguration();
 
             // Last, because it is modal: everything above has to be in place
             // before the app stops to ask a question.
@@ -936,6 +1000,35 @@ impl AppDelegate {
         *self.ivars().watchdog.borrow_mut() = Some(timer);
     }
 
+    /// How often to check whether what the panel is showing is still true.
+    /// Two registry reads and a list compare, and only while the panel is on
+    /// screen — cheap enough to run far more often than the watchdog's sweep.
+    const DISPLAY_RECONFIG_SECONDS: f64 = 0.15;
+
+    fn start_watching_reconfiguration(&self) {
+        if self.ivars().reconfig.borrow().is_some() {
+            return;
+        }
+        // The handler runs on whatever thread CoreGraphics chooses, so it
+        // touches nothing but the flag; `reconfigured:` on the main-thread
+        // timer is what turns that into a redraw.
+        kd_sys::watch::on_reconfiguration(|_, _| {
+            DISPLAY_DIRTY.store(true, Ordering::Relaxed);
+        });
+        // SAFETY: the timer targets this delegate, which lives as long as the
+        // application.
+        let timer = unsafe {
+            NSTimer::scheduledTimerWithTimeInterval_target_selector_userInfo_repeats(
+                Self::DISPLAY_RECONFIG_SECONDS,
+                self,
+                sel!(reconfigured:),
+                None,
+                true,
+            )
+        };
+        *self.ivars().reconfig.borrow_mut() = Some(timer);
+    }
+
     /// Whether the click being handled asked for a context menu.
     fn is_secondary_click(&self) -> bool {
         let Some(event) = NSApplication::sharedApplication(self.mtm()).currentEvent() else {
@@ -1051,6 +1144,13 @@ impl AppDelegate {
         if appkit::mouse_is_down() {
             return;
         }
+        // Cleared before the state is read, never after: a reconfiguration
+        // landing between the two sets it again and is redrawn a tick later,
+        // where clearing afterwards would drop it. Both record that what is
+        // about to be drawn is current, so `reconfigured:` can tell when it
+        // stops being.
+        DISPLAY_DIRTY.store(false, Ordering::Relaxed);
+        *self.ivars().displays.borrow_mut() = DisplayState::read();
         // A display that was off when the backends were probed has none, so a
         // reconnected one would show a dead brightness slider until restart.
         service.borrow_mut().refresh_if_stale();
@@ -1104,4 +1204,53 @@ fn main() {
     app.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
 
     app.run();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::DisplayState;
+
+    /// A monitor, as its EDID describes it.
+    const DELL: (u32, u32, u32) = (0x10AC, 0x41B5, 0x4237_314C);
+
+    /// The gap this closes. A display switched off from the panel keeps its
+    /// card but has already left the layout, so pulling its cable moves nothing
+    /// there — the layout has nothing left to lose. Watching only the layout is
+    /// therefore blind to exactly the unplug the card needs to hear about.
+    #[test]
+    fn an_unplug_shows_up_even_when_the_layout_cannot_report_it() {
+        let switched_off = DisplayState::new(vec![1], vec![DELL]);
+        let then_unplugged = DisplayState::new(vec![1], vec![]);
+        assert_ne!(switched_off, then_unplugged);
+        // And the half that used to be watched alone did not move at all.
+        assert_eq!(switched_off.online, then_unplugged.online);
+    }
+
+    /// The ordinary hotplug, still caught.
+    #[test]
+    fn a_display_leaving_the_layout_is_a_change() {
+        assert_ne!(
+            DisplayState::new(vec![1, 2], vec![DELL]),
+            DisplayState::new(vec![1], vec![]),
+        );
+    }
+
+    /// Every tick compares these, so a shuffled enumeration reading as a change
+    /// would rebuild the panel several times a second — replacing the row under
+    /// the pointer and swallowing whatever click was in flight.
+    #[test]
+    fn a_reordered_enumeration_is_not_a_change() {
+        let other = (0x4C2D, 0x0F2B, 0x0000_0001);
+        assert_eq!(
+            DisplayState::new(vec![1, 2, 3], vec![DELL, other]),
+            DisplayState::new(vec![3, 1, 2], vec![other, DELL]),
+        );
+    }
+
+    /// Nothing plugged in and nothing on screen is the state a fresh delegate
+    /// starts in, and it must not read as a change against itself.
+    #[test]
+    fn an_empty_state_matches_the_default() {
+        assert_eq!(DisplayState::default(), DisplayState::new(vec![], vec![]));
+    }
 }

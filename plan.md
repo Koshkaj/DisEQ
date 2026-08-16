@@ -325,10 +325,47 @@ DELL U2720Q   backend: Software
   because the transactions block for as long as the window server takes.
   Polled, not driven by `CGDisplayRegisterReconfigurationCallback`: the display in question
   is one CoreGraphics does not believe exists, so plugging a monitor into that port
-  publishes no reconfiguration to wait for.
+  publishes no reconfiguration to wait for. This is the only thing left on that slow poll —
+  everything else redraws off the callback, below.
 - Where the registry cannot be read at all, every one of those checks reports `Unknown` and
   allows the operation. A machine this code does not recognise keeps its old behaviour
   rather than losing the feature.
+
+### An open panel redraws as soon as it stops being true
+
+Whatever the user does, and from whichever direction. Three things feed that, because no one
+of them covers the others:
+
+- `CGDisplayRegisterReconfigurationCallback` for anything CoreGraphics considers a change —
+  plug, unplug, mode, arrangement. It fires on a thread of the window server's choosing, so
+  the handler only sets an atomic flag; a 150 ms timer on the main thread turns that into a
+  rebuild. That also coalesces the burst a single hotplug produces into one redraw.
+- A fingerprint of **both** the online display list and the attached panel list, compared on
+  that same timer. The layout alone is not enough: a display switched off from the panel has
+  already left `CGGetOnlineDisplayList` while its card is still on screen, so pulling its
+  cable moves nothing there — the layout has nothing left to lose. Only the panel list still
+  holds it, and only the panel list moves when the cable does. Watching the layout alone left
+  a card offering to reconnect a monitor that had been unplugged in front of it.
+- The 3 s watchdog, for the one case nothing reports at all: a port the window server has
+  switched off publishes no reconfiguration when a monitor is plugged into it, because
+  CoreGraphics does not believe that display exists. Recovery is its only job now — a display
+  it brings back joins the layout, which the timer above sees like any other hotplug.
+
+The two reads cost well under a millisecond together (the IOKit panel walk being the cheaper
+of the two, ~65 µs against ~385 µs for `CGGetOnlineDisplayList`) and are only paid while the
+panel is on screen. Both lists are sorted before comparison: neither enumeration promises an
+order, and one that came back shuffled would read as a change and rebuild the view tree out
+from under the pointer several times a second.
+
+`rebuild` is what records the fingerprint and clears the flag, because it is the only thing
+that can make them true — and it clears the flag *before* reading the state, never after, so
+a reconfiguration landing between the two is redrawn a tick later instead of being dropped.
+A rebuild refused mid-press records nothing, leaving the change to be redrawn once the button
+is released.
+
+Volume needed nothing: the frame timer already runs continuously while the driver is
+installed, and `Route::tick` follows the device's own volume control every frame, so the
+menu-bar slider and the volume keys are picked up in ~16 ms.
 
 ### The display transactions lie about their own outcome
 

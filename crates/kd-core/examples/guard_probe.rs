@@ -129,6 +129,22 @@ fn main() {
                     .any(|p| p.matches_snapshot(&target.snapshot)),
             );
 
+            // What the panel has to watch to notice the cable coming out while
+            // that card is on screen. A display switched off is already gone
+            // from the layout, so the layout cannot report the unplug — it has
+            // nothing left to lose. Only the panel list still holds it, and so
+            // only the panel list moves when the cable does.
+            check(
+                "the layout has already lost it, so it cannot report the unplug",
+                !kd_sys::display::online_displays().contains(&id),
+            );
+            check(
+                "the panel list still holds it, so it is what the unplug moves",
+                panel::attached_panels()
+                    .iter()
+                    .any(|p| p.matches_snapshot(&target.snapshot)),
+            );
+
             match card {
                 Some(card) => {
                     check(
