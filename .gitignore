@@ -4,6 +4,9 @@
 # Source repositories and research material used only for local reference
 /references/
 
+# Working design notes, kept locally rather than shipped with the source
+/plan.md
+
 # Machine-local editor and agent state
 /.claude/
 /.idea/
