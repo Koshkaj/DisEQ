@@ -1,0 +1,25 @@
+name: test
+
+# Runs on its own for every branch push and pull request, and is called by the
+# release workflow so a tag cannot publish a build the checks never passed.
+on:
+  push:
+    branches:
+      - "**"
+  pull_request:
+  workflow_call:
+
+jobs:
+  test:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: Swatinem/rust-cache@v2
+
+      # Not the integration tests: `kd-audio`'s offline EQ checks drive AVAudio
+      # and need a Core Audio state a runner cannot be relied on to have.
+      - name: Test
+        run: |
+          cargo clippy --workspace --all-targets -- -D warnings
+          cargo test --workspace --lib --bins

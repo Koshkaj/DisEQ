@@ -13,7 +13,13 @@ permissions:
   contents: write
 
 jobs:
+  # A tag must not publish a build the checks never passed, so the same
+  # workflow that guards every push guards the release too.
+  test:
+    uses: ./.github/workflows/test.yml
+
   dmg:
+    needs: test
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
@@ -35,13 +41,6 @@ jobs:
             exit 1
           fi
           echo "VERSION=$version" >> "$GITHUB_ENV"
-
-      # Not the integration tests: `kd-audio`'s offline EQ checks drive AVAudio
-      # and need a Core Audio state a runner cannot be relied on to have.
-      - name: Test
-        run: |
-          cargo clippy --workspace --all-targets -- -D warnings
-          cargo test --workspace --lib --bins
 
       - name: Build the disk image
         run: make dmg
