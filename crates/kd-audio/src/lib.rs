@@ -9,6 +9,7 @@ pub mod eq;
 pub mod format;
 pub mod mixer;
 pub mod offline;
+pub mod playable;
 pub mod playback;
 pub mod processes;
 pub mod ring;

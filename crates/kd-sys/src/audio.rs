@@ -40,6 +40,8 @@ const NOMINAL_SAMPLE_RATE: u32 = fourcc(b"nsrt");
 const SAFETY_OFFSET: u32 = fourcc(b"saft");
 const BUFFER_FRAME_SIZE: u32 = fourcc(b"fsiz");
 const IS_ALIVE: u32 = fourcc(b"livn");
+/// Whether any process on the machine has the device's I/O running.
+const IS_RUNNING_SOMEWHERE: u32 = fourcc(b"gone");
 /// Finds the plug-in object a bundle ID belongs to. The only way to address a
 /// HAL plug-in that is publishing no devices — which ours does until asked.
 const TRANSLATE_BUNDLE_TO_PLUGIN: u32 = fourcc(b"bidp");
@@ -92,6 +94,43 @@ extern "C" {
         qualifier: *const c_void,
         data_size: *mut u32,
     ) -> i32;
+
+    fn AudioDeviceCreateIOProcID(
+        device: AudioObjectId,
+        proc_: IoProc,
+        client_data: *mut c_void,
+        proc_id: *mut *mut c_void,
+    ) -> i32;
+
+    fn AudioDeviceDestroyIOProcID(device: AudioObjectId, proc_id: *mut c_void) -> i32;
+
+    fn AudioDeviceStart(device: AudioObjectId, proc_id: *mut c_void) -> i32;
+
+    fn AudioDeviceStop(device: AudioObjectId, proc_id: *mut c_void) -> i32;
+}
+
+/// `AudioDeviceIOProc`. Every pointer is opaque here: the probe that uses it
+/// writes nothing, and the HAL has already zeroed the output buffers.
+type IoProc = unsafe extern "C" fn(
+    AudioObjectId,
+    *const c_void,
+    *const c_void,
+    *const c_void,
+    *mut c_void,
+    *const c_void,
+    *mut c_void,
+) -> i32;
+
+unsafe extern "C" fn silent_io(
+    _device: AudioObjectId,
+    _now: *const c_void,
+    _input: *const c_void,
+    _input_time: *const c_void,
+    _output: *mut c_void,
+    _output_time: *const c_void,
+    _client_data: *mut c_void,
+) -> i32 {
+    0
 }
 
 fn address(selector: u32, scope: u32) -> PropertyAddress {
@@ -469,6 +508,43 @@ pub fn transport_type(device: AudioObjectId) -> Option<u32> {
 pub fn is_alive(device: AudioObjectId) -> bool {
     let mut value: u32 = 0;
     get(device, &address(IS_ALIVE, SCOPE_GLOBAL), &mut value) && value != 0
+}
+
+/// Whether some process — this one or any other — is playing through the
+/// device right now. A device that is running is one whose I/O starts.
+pub fn is_running_somewhere(device: AudioObjectId) -> bool {
+    let mut value: u32 = 0;
+    get(
+        device,
+        &address(IS_RUNNING_SOMEWHERE, SCOPE_GLOBAL),
+        &mut value,
+    ) && value != 0
+}
+
+/// Whether the device's I/O actually starts, found out by starting it with a
+/// callback that plays silence and stopping it again.
+///
+/// Nothing short of this answers the question. An external display publishes
+/// an audio device whether or not its link will carry audio, and one that will
+/// not reports every property exactly as one that will — until I/O is asked to
+/// start and Core Audio gives up waiting for the clock, returning
+/// `kAudioHardwareNotRunningError` about ten seconds later. So this blocks for
+/// that long on such a device, and belongs on a thread of its own.
+pub fn io_starts(device: AudioObjectId) -> bool {
+    let mut proc_id: *mut c_void = ptr::null_mut();
+    // SAFETY: `silent_io` matches `AudioDeviceIOProc` and touches nothing, so
+    // it needs no client data; the proc is destroyed on every path out.
+    unsafe {
+        if AudioDeviceCreateIOProcID(device, silent_io, ptr::null_mut(), &mut proc_id) != 0 {
+            return false;
+        }
+        let started = AudioDeviceStart(device, proc_id) == 0;
+        if started {
+            AudioDeviceStop(device, proc_id);
+        }
+        AudioDeviceDestroyIOProcID(device, proc_id);
+        started
+    }
 }
 
 /// The rate the device is configured for.

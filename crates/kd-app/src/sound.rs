@@ -12,6 +12,7 @@
 use kd_audio::devices::{self, Device};
 use kd_audio::eq::{self, Equalizer, Settings};
 use kd_audio::mixer::{Mixer, MAX_FADERS};
+use kd_audio::playable::Playable;
 use kd_audio::processes::{self, Process};
 use kd_audio::router::{self, Health, Route};
 use kd_core::Display;
@@ -161,6 +162,10 @@ pub struct SoundService {
     retry: u32,
     /// The wait after the next failed attempt, doubling each time.
     retry_interval: u32,
+    /// Which display-audio outputs will play, so the picker lists only those.
+    playable: Playable,
+    /// The last [`Playable::generation`] the panel was drawn with.
+    listed: u32,
     /// Everything that outlives the process.
     config: Config,
     /// Whether `config` has changed since it was last written.
@@ -226,6 +231,8 @@ impl SoundService {
             generation: 0,
             retry: 0,
             retry_interval: RETRY_TICKS,
+            playable: Playable::new(),
+            listed: 0,
             config,
             dirty: false,
         };
@@ -245,6 +252,8 @@ impl SoundService {
         if service.config.mixing {
             let _ = service.set_mixing(true);
         }
+        // Started now so the answers are in by the time the picker is opened.
+        service.playable.check(&router::targets());
         service
     }
 
@@ -252,6 +261,9 @@ impl SoundService {
     /// opens, which is when a driver installed since launch should appear.
     pub fn refresh(&mut self) {
         self.availability = Availability::probe();
+        // Monitors come and go while the panel is shut; this tries any that
+        // are new, and re-tries any whose last verdict has gone stale.
+        self.playable.check(&router::targets());
         match &self.route {
             // While routing, the device the user hears is the route's, not the
             // system's — the system's is ours.
@@ -381,8 +393,16 @@ impl SoundService {
     }
 
     /// Hardware outputs offered by the source picker.
+    ///
+    /// Only the ones that will play: display audio is listed once it has been
+    /// tried and worked, and the picker is redrawn as those answers arrive.
     pub fn outputs(&self) -> Vec<Device> {
-        router::targets()
+        let targets = router::targets();
+        self.playable.check(&targets);
+        targets
+            .into_iter()
+            .filter(|device| self.playable.offers(device))
+            .collect()
     }
 
     pub fn output_is_selected(&self, device: &Device) -> bool {
@@ -405,6 +425,7 @@ impl SoundService {
         // directly to the hardware otherwise. Either destination changes here,
         // so rebuild its taps after the output has moved.
         let was_mixing = self.mixer.is_some();
+        let previous = self.target.clone();
         // Whether enhancement is wanted, not whether a route happens to be up.
         // One lost to a coreaudiod restart is still wanted, and switching
         // straight to the hardware here is what left the virtual device
@@ -412,7 +433,29 @@ impl SoundService {
         let routed = self.route.is_some() || (self.config.routing && self.availability.driver);
         let moved = if routed {
             self.mixer = None;
-            self.retarget(target)
+            match self.retarget(target.clone()) {
+                Ok(()) => Ok(()),
+                Err(error) => {
+                    if let Some(destination) = std::env::var_os("KD_SOUND_LOG") {
+                        log_line(
+                            &destination,
+                            &format!("{} would not start: {error}", target.name),
+                        );
+                    }
+                    self.playable.record_failure(&target);
+                    // Back to where it was playing, rather than leaving nothing
+                    // routed — and, with enhancement still wanted, the lost
+                    // route retried at an output that will not start.
+                    if let Some(previous) =
+                        previous.filter(|previous| !self.playable.failed(previous))
+                    {
+                        let _ = self.retarget(previous);
+                    }
+                    // The underlying error is an NSError code, which says
+                    // nothing to anyone reading the card.
+                    Err(format!("{} is not accepting audio", target.name))
+                }
+            }
         } else {
             if !devices::set_default_output(&target) {
                 return Err("The system refused the output change".into());
@@ -592,7 +635,10 @@ impl SoundService {
                 .and_then(|target| target.uid.as_deref())
                 .and_then(devices::by_uid)
                 .filter(|device| {
-                    device.has_output && !device.is_virtual() && kd_sys::audio::is_alive(device.id)
+                    device.has_output
+                        && !device.is_virtual()
+                        && kd_sys::audio::is_alive(device.id)
+                        && !self.playable.failed(device)
                 })
                 .or_else(|| remembered_target(&self.config));
             self.set_routing(true)
@@ -963,7 +1009,11 @@ impl SoundService {
             routing: self.is_routing(),
             output: self.output_name(),
         };
-        ramped || before.changed(&after)
+        // A verdict on an output arriving changes what the picker lists.
+        let verdicts = self.playable.generation();
+        let relisted = verdicts != self.listed;
+        self.listed = verdicts;
+        ramped || before.changed(&after) || relisted
     }
 
     /// Whether the frame timer is still worth running. The device poll needs it

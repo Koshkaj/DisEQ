@@ -61,6 +61,12 @@ pub fn no_insets() -> NSEdgeInsets {
     }
 }
 
+/// The width a row inside a card has to work with.
+pub fn card_content_width() -> f64 {
+    let (panel, card) = (panel_insets(), card_insets());
+    PANEL_WIDTH - panel.left - panel.right - card.left - card.right
+}
+
 pub fn card_insets() -> NSEdgeInsets {
     NSEdgeInsets {
         top: 10.0,

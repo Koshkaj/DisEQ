@@ -43,6 +43,25 @@ pub fn caption(mtm: MainThreadMarker, text: &str) -> Retained<NSTextField> {
     field
 }
 
+/// A caption that wraps at `width` rather than growing to fit its text.
+///
+/// A plain caption is one line as wide as its text, and that width is a hard
+/// minimum for everything around it — so a long error message pushed the whole
+/// panel wider to make room for itself.
+pub fn wrapping_caption(mtm: MainThreadMarker, text: &str, width: f64) -> Retained<NSTextField> {
+    let field = NSTextField::wrappingLabelWithString(&NSString::from_str(text), mtm);
+    field.setFont(Some(&NSFont::systemFontOfSize(theme::CAPTION_SIZE)));
+    field.setTextColor(Some(&NSColor::secondaryLabelColor()));
+    // The height it reports has to be for the width it will actually get, or
+    // the panel is sized for one line and the rest is clipped.
+    field.setPreferredMaxLayoutWidth(width);
+    field.setContentCompressionResistancePriority_forOrientation(
+        250.0,
+        NSLayoutConstraintOrientation::Horizontal,
+    );
+    field
+}
+
 /// A caption pinned to an exact width and forbidden from wrapping.
 ///
 /// Two things this fixes. A label left to its intrinsic width makes every row
@@ -675,6 +694,28 @@ pub fn run_interaction_self_test(mtm: MainThreadMarker) -> Result<(), String> {
         if !unsafe { hit.as_ref() }.is_some_and(|view| view.isDescendantOf(&slider)) {
             return Err(format!("a clickable card intercepted its nested {kind}"));
         }
+    }
+
+    // A notice carries whatever the system said. Laid out as the card lays it
+    // out, a long one has to wrap to the card's width instead of claiming one
+    // line's worth — which widened the whole panel.
+    let said = "the output engine would not start: The operation couldn’t be completed. \
+                (com.apple.coreaudio.avfaudio error 1937010544.)";
+    let width = theme::card_content_width();
+    let notice = wrapping_caption(mtm, said, width);
+    let spacer = spacer(mtm);
+    let row = hstack(mtm, theme::ROW_SPACING, &[&notice, &spacer]);
+    let card = vstack_filling(mtm, theme::ROW_SPACING, theme::no_insets(), &[&row]);
+    let one_line = caption(mtm, said).fittingSize();
+    let laid_out = card.fittingSize();
+    if laid_out.width > width {
+        return Err(format!(
+            "a long notice made its card {:.0}pt wide, past the {width:.0}pt it has",
+            laid_out.width
+        ));
+    }
+    if laid_out.height <= one_line.height {
+        return Err("a long notice was not given the height to wrap".into());
     }
 
     // A rebuild replaces the hovered row with a fresh one whose highlight is

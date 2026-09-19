@@ -135,13 +135,7 @@ fn display_card(
     }
 
     if let Some(notice) = state.notice.as_deref() {
-        let text = appkit::caption(mtm, notice);
-        let spacer = appkit::spacer(mtm);
-        rows.push(Retained::into_super(appkit::hstack(
-            mtm,
-            theme::ROW_SPACING,
-            &[&text, &spacer],
-        )));
+        rows.push(note_row(mtm, notice));
     }
 
     rows.push(caret_row(
@@ -687,13 +681,7 @@ fn sound_card(
     }
 
     if let Some(notice) = state.sound_notice.as_deref() {
-        let text = appkit::caption(mtm, notice);
-        let spacer = appkit::spacer(mtm);
-        rows.push(Retained::into_super(appkit::hstack(
-            mtm,
-            theme::ROW_SPACING,
-            &[&text, &spacer],
-        )));
+        rows.push(note_row(mtm, notice));
     }
 
     rows.push(caret_row(mtm, state.sound_expanded, sound_tag(0), target));
@@ -1072,9 +1060,11 @@ fn outputs_card(
 
 // --- shared -----------------------------------------------------------------
 
-/// A line of explanatory text, left-aligned across the card.
+/// Explanatory text, left-aligned across the card and wrapped to its width.
+/// Notices carry whatever the system said, and a long one must not widen the
+/// panel to fit on one line.
 fn note_row(mtm: MainThreadMarker, text: &str) -> Retained<NSView> {
-    let caption = appkit::caption(mtm, text);
+    let caption = appkit::wrapping_caption(mtm, text, theme::card_content_width());
     let spacer = appkit::spacer(mtm);
     Retained::into_super(appkit::hstack(
         mtm,
