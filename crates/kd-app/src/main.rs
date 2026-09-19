@@ -280,6 +280,18 @@ define_class!(
             self.rebuild();
         }
 
+        #[unsafe(method(bypassToggled:))]
+        fn bypass_toggled(&self, sender: Option<&AnyObject>) {
+            let Some(control) = control(sender) else { return };
+            let bypassed = control.doubleValue() != 0.0;
+            let Some(sound) = self.sound() else { return };
+            let outcome = sound.borrow_mut().set_bypassed(bypassed);
+            self.ivars().state.borrow_mut().settings_notice = outcome.err();
+            // Coming back through DisEQ starts a route, which needs stepping.
+            self.start_ticking();
+            self.rebuild();
+        }
+
         #[unsafe(method(openLoginItemsSettings:))]
         fn open_login_items_settings(&self, _sender: Option<&AnyObject>) {
             if !kd_sys::login_item::open_system_settings() {
@@ -373,10 +385,6 @@ define_class!(
             let outcome = {
                 let mut sound = sound.borrow_mut();
                 match action {
-                    SoundAction::Routing => {
-                        let wanted = !sound.is_routing();
-                        sound.set_routing(wanted)
-                    }
                     SoundAction::Equaliser => {
                         let wanted = !sound.settings().enabled;
                         sound.set_eq_enabled(wanted);

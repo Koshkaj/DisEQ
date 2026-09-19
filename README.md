@@ -124,9 +124,11 @@ make lint
 
 ## Audio driver
 
-Audio enhancement requires the companion HAL plug-in. A released app installs
-it itself, from the copy it carries; the targets below are the development
-path, which acts on `target/DisEQ.driver` directly.
+Routing audio through DisEQ — the equaliser, and a volume control on outputs
+that have none of their own — requires the companion HAL plug-in. Audio is
+routed whenever it is installed, unless DisEQ is bypassed in Settings. A
+released app installs it itself, from the copy it carries; the targets below
+are the development path, which acts on `target/DisEQ.driver` directly.
 
 Building it needs no administrator privileges:
 

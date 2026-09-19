@@ -63,9 +63,6 @@ impl ViewState {
 /// they must not collide with the band and fader ranges `views` reserves.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum SoundAction {
-    /// Take over the default output and run everything through the EQ. The
-    /// switch that gives a fixed-volume device a working volume slider.
-    Routing = 1,
     /// The EQ bands themselves, bypassable without tearing the route down.
     Equaliser = 2,
     /// Pull the preamp down by the loudest band so boosting cannot clip.
@@ -75,17 +72,21 @@ pub enum SoundAction {
 }
 
 impl SoundAction {
-    pub const ALL: &[(&'static str, &'static str, SoundAction)] = &[
-        ("Audio Enhancement", "waveform.circle", SoundAction::Routing),
+    /// The switches the card lists, in order.
+    ///
+    /// Auto Preamp is not one of them. It sets the equaliser's preamp, which is
+    /// bypassed along with the rest of the equaliser when that is off, so it
+    /// lives in the equaliser's own section and shows only while it is on.
+    pub const CARD: &[(&'static str, &'static str, SoundAction)] = &[
         ("Equaliser", "slider.vertical.3", SoundAction::Equaliser),
-        ("Auto Preamp", "gauge.with.needle", SoundAction::AutoPreamp),
         ("App Mixer", "square.stack.3d.up", SoundAction::AppMixer),
     ];
 
+    pub const AUTO_PREAMP: &'static str = "Auto Preamp";
+
     pub fn from_index(value: isize) -> Option<Self> {
-        Self::ALL
-            .iter()
-            .map(|(_, _, action)| *action)
+        [Self::Equaliser, Self::AutoPreamp, Self::AppMixer]
+            .into_iter()
             .find(|action| *action as isize == value)
     }
 }

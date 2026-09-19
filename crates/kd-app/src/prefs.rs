@@ -32,6 +32,10 @@ pub struct Config {
     pub target_uid: Option<String>,
     /// Master volume, 0..1.
     pub volume: f64,
+    /// Whether audio goes through DisEQ. On unless bypassed in Settings: the
+    /// route is what the equaliser and the volume control on outputs without
+    /// one of their own depend on, so it is not a choice the Sound card asks
+    /// for. A file from when it was a switch there keeps what was chosen.
     pub routing: bool,
     /// Restored as it was left. It costs a process tap, and therefore the
     /// system-audio-recording prompt — but only for someone who had the mixer

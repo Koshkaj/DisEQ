@@ -103,9 +103,9 @@ most of the current 2.9 MB executable without materially changing runtime RAM.
 
 After installing the renamed driver, record three additional scenarios:
 
-1. driver installed, enhancement off;
-2. enhancement on while silent;
-3. enhancement on while playing audio, with the panel both closed and open.
+1. driver installed, DisEQ bypassed;
+2. routing while silent;
+3. routing while playing audio, with the panel both closed and open.
 
 Use Instruments' Audio System Trace and Time Profiler, and measure the DisEQ
 app plus the HAL plug-in host. Watch callback deadline misses, ring-buffer
@@ -117,9 +117,9 @@ The real-time callback must remain allocation-free and lock-free.
 | Scenario | Physical footprint | CPU |
 | --- | ---: | ---: |
 | App idle, driver unavailable | at most 16 MB | below 0.1% |
-| App idle, driver installed, enhancement off | at most 18 MB | below 0.1% |
-| Enhancement active, panel closed | at most 25 MB | below 1% when silent |
-| Enhancement active, panel open | at most 25 MB | below 2% excluding audio workload |
+| App idle, driver installed, bypassed | at most 18 MB | below 0.1% |
+| Routing, panel closed | at most 25 MB | below 1% when silent |
+| Routing, panel open | at most 25 MB | below 2% excluding audio workload |
 
 Also target a responsive menu-bar icon within 200 ms, no main-thread operation
 over 16 ms during ordinary interaction, and a release executable near 1 MB once

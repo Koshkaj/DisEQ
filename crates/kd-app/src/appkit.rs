@@ -10,10 +10,11 @@ use objc2::runtime::{AnyObject, Sel};
 use objc2::{define_class, msg_send, sel, AnyThread, DefinedClass, MainThreadOnly, Message};
 use objc2_app_kit::{
     NSAccessibility, NSApplication, NSBackingStoreType, NSButton, NSColor, NSCompositingOperation,
-    NSControl, NSControlStateValueOff, NSControlStateValueOn, NSCursor, NSEvent, NSFont, NSImage,
-    NSImageView, NSLayoutAttribute, NSLayoutConstraintOrientation, NSLineBreakMode, NSSlider,
-    NSStackView, NSStackViewDistribution, NSSwitch, NSTextAlignment, NSTextField, NSTrackingArea,
-    NSTrackingAreaOptions, NSUserInterfaceLayoutOrientation, NSView, NSWindow, NSWindowStyleMask,
+    NSControl, NSControlSize, NSControlStateValueOff, NSControlStateValueOn, NSCursor, NSEvent,
+    NSFont, NSImage, NSImageView, NSLayoutAttribute, NSLayoutConstraintOrientation,
+    NSLineBreakMode, NSSlider, NSStackView, NSStackViewDistribution, NSSwitch, NSTextAlignment,
+    NSTextField, NSTrackingArea, NSTrackingAreaOptions, NSUserInterfaceLayoutOrientation, NSView,
+    NSWindow, NSWindowStyleMask,
 };
 use objc2_foundation::{
     MainThreadMarker, NSData, NSEdgeInsets, NSObject, NSPoint, NSRect, NSSize, NSString,
@@ -440,6 +441,21 @@ pub fn switch(
     }
     switch
         .setContentHuggingPriority_forOrientation(751.0, NSLayoutConstraintOrientation::Horizontal);
+    switch
+}
+
+/// A switch two sizes down, for a setting that belongs to another switch's
+/// section. The same size as the switch that opened the section, it reads as
+/// a peer of it rather than a part of it; one size down still did.
+pub fn compact_switch(
+    mtm: MainThreadMarker,
+    on: bool,
+    tag: isize,
+    target: &AnyObject,
+    action: Sel,
+) -> Retained<NSSwitch> {
+    let switch = switch(mtm, on, tag, target, action);
+    switch.setControlSize(NSControlSize::Mini);
     switch
 }
 

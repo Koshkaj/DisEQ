@@ -50,7 +50,7 @@ pub fn root(
         }
         Route::Presets => cards.push(presets_card(mtm, sound, target)),
         Route::Outputs => cards.push(outputs_card(mtm, sound, target)),
-        Route::Settings => cards.push(settings_card(mtm, state, target)),
+        Route::Settings => cards.push(settings_card(mtm, sound, state, target)),
         Route::Root => {
             for (index, display) in catalog.displays.iter().enumerate() {
                 cards.push(display_card(
@@ -470,7 +470,12 @@ fn back_row(mtm: MainThreadMarker, title: &str, target: &AnyObject) -> Retained<
 
 // --- settings, footer -------------------------------------------------------
 
-fn settings_card(mtm: MainThreadMarker, state: &ViewState, target: &AnyObject) -> Retained<NSView> {
+fn settings_card(
+    mtm: MainThreadMarker,
+    sound: &SoundService,
+    state: &ViewState,
+    target: &AnyObject,
+) -> Retained<NSView> {
     use kd_sys::login_item::Status;
 
     let status = kd_sys::login_item::status();
@@ -497,6 +502,32 @@ fn settings_card(mtm: MainThreadMarker, state: &ViewState, target: &AnyObject) -
             target,
             sel!(openLoginItemsSettings:),
         ));
+    }
+
+    // Audio goes through DisEQ whenever the driver is there. This is the way
+    // out of it — for an interface whose own knob and latency are the point,
+    // or when something in the route is wrong and plain system audio is wanted
+    // without quitting.
+    if sound.availability().driver {
+        rows.push(switch_row(
+            mtm,
+            "Bypass DisEQ",
+            "arrow.uturn.forward",
+            sound.is_bypassed(),
+            true,
+            SwitchControl {
+                tag: 0,
+                target,
+                action: sel!(bypassToggled:),
+            },
+        ));
+        if sound.is_bypassed() {
+            rows.push(note_row(
+                mtm,
+                "Audio plays straight to the output: no equaliser, and no volume \
+                 control on outputs without one of their own.",
+            ));
+        }
     }
 
     // A build with no driver to install — one run straight out of `target/`
@@ -706,11 +737,12 @@ fn sound_rows(
     let mut rows: Vec<Retained<NSView>> = Vec::new();
     let availability = sound.availability();
 
-    // The missing driver disables three of the four switches, so it is reported
-    // once here rather than repeated under each of them — and reported with the
-    // way out attached, since the app carries the driver it is asking for.
-    if let Some(reason) = availability.eq_blocked() {
-        rows.push(note_row(mtm, &reason));
+    // The missing driver disables the equaliser, so it is reported here, at the
+    // top of the card, with the way out attached — the app carries the driver
+    // it is asking for.
+    let eq_blocked = availability.eq_blocked();
+    if let Some(reason) = &eq_blocked {
+        rows.push(note_row(mtm, reason));
         if kd_sys::driver_install::state().needs_install() {
             rows.push(command_row(
                 mtm,
@@ -721,13 +753,21 @@ fn sound_rows(
             ));
         }
     }
+    // Bypassed, audio never reaches the equaliser. Said once, like the driver,
+    // with where to undo it — the switch that did it is not on this card.
+    let eq_blocked = eq_blocked.or_else(|| {
+        sound.is_bypassed().then(|| {
+            rows.push(note_row(mtm, "DisEQ is bypassed in Settings"));
+            "DisEQ is bypassed".to_string()
+        })
+    });
 
-    for (label, symbol, action) in SoundAction::ALL {
+    for (label, symbol, action) in SoundAction::CARD {
         let (on, blocked) = match action {
-            SoundAction::Routing => (sound.is_routing(), availability.eq_blocked()),
-            SoundAction::Equaliser => (sound.settings().enabled, availability.eq_blocked()),
-            SoundAction::AutoPreamp => (sound.settings().auto_preamp, availability.eq_blocked()),
+            SoundAction::Equaliser => (sound.settings().enabled, eq_blocked.clone()),
             SoundAction::AppMixer => (sound.is_mixing(), availability.mixer_blocked()),
+            // In the equaliser's section, below.
+            SoundAction::AutoPreamp => continue,
         };
         let available = blocked.is_none();
         rows.push(switch_row(
@@ -742,7 +782,7 @@ fn sound_rows(
                 action: sel!(soundSwitched:),
             },
         ));
-        // The equaliser's only blocker is the driver, already reported above.
+        // The equaliser's blockers are reported above, once.
         if let Some(reason) = blocked.filter(|_| *action == SoundAction::AppMixer) {
             rows.push(note_row(mtm, &reason));
         }
@@ -756,6 +796,18 @@ fn sound_rows(
             SoundAction::Equaliser => {
                 rows.push(preset_row(mtm, sound, target));
                 rows.push(band_bank(mtm, sound, target));
+                // With the preamp it decides, beneath the bands whose boosts it
+                // is making room for.
+                rows.push(setting_switch_row(
+                    mtm,
+                    SoundAction::AUTO_PREAMP,
+                    sound.settings().auto_preamp,
+                    SwitchControl {
+                        tag: sound_tag(SoundAction::AutoPreamp as isize),
+                        target,
+                        action: sel!(soundSwitched:),
+                    },
+                ));
                 // Auto-preamp owns the headroom while it is on, and a manual
                 // offset on top of it can only add gain to a signal that has
                 // already been measured as needing less. Hidden rather than
@@ -932,11 +984,12 @@ fn preamp_row(mtm: MainThreadMarker, sound: &SoundService, target: &AnyObject) -
     // Only ever shown with auto-preamp off, so the readout and the slider are
     // the same number.
     let shown = settings.global_gain();
+    // Leading-aligned, to start where the Auto Preamp caption above it does.
     let label = appkit::fixed_caption(
         mtm,
         "Preamp",
         theme::BAND_LABEL_WIDTH,
-        NSTextAlignment::Right,
+        NSTextAlignment::Left,
     );
     let slider = appkit::fader(
         mtm,
@@ -992,6 +1045,27 @@ fn switch_row(
         appkit::set_enabled(&row, false);
     }
     row
+}
+
+/// A switch that belongs to the section above it rather than to the card.
+///
+/// Styled like the preamp row it sits with — a caption and no icon — and with
+/// a smaller switch, so it reads as a setting of the equaliser and not as a
+/// second equaliser switch.
+fn setting_switch_row(
+    mtm: MainThreadMarker,
+    label: &str,
+    on: bool,
+    control: SwitchControl<'_>,
+) -> Retained<NSView> {
+    let text = appkit::caption(mtm, label);
+    let spacer = appkit::spacer(mtm);
+    let switch = appkit::compact_switch(mtm, on, control.tag, control.target, control.action);
+    Retained::into_super(appkit::hstack(
+        mtm,
+        theme::ROW_SPACING,
+        &[&text, &spacer, &switch],
+    ))
 }
 
 /// The equaliser's preset list, as a card of its own.

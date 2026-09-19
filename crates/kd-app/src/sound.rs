@@ -5,9 +5,11 @@
 //! is the driver loaded, are taps permitted, is something else already holding
 //! the default output.
 //!
-//! Both features are off until asked for. Routing takes over the system's
-//! default output device and the App Mixer mutes applications, and neither is
-//! something to do because the panel was opened.
+//! The route is on whenever the driver is installed, unless DisEQ is bypassed
+//! in Settings: the equaliser runs inside it, and it is what gives an output
+//! with no volume control of its own a working one. The App Mixer is off until
+//! asked for — it mutes applications, which is not something to do because
+//! the panel was opened.
 
 use kd_audio::devices::{self, Device};
 use kd_audio::eq::{self, Equalizer, Settings};
@@ -329,6 +331,18 @@ impl SoundService {
         self.route.is_some()
     }
 
+    /// Whether audio has been set to skip DisEQ entirely, from Settings.
+    pub fn is_bypassed(&self) -> bool {
+        !self.config.routing
+    }
+
+    /// Sends audio straight to the output, or back through DisEQ.
+    pub fn set_bypassed(&mut self, bypassed: bool) -> Result<(), String> {
+        let result = self.set_routing(!bypassed);
+        self.save();
+        result
+    }
+
     pub fn health(&self) -> Option<Health> {
         self.route.as_ref().map(|route| route.health())
     }
@@ -421,12 +435,12 @@ impl SoundService {
             return Ok(());
         }
 
-        // A mixer writes to the route's proxy when enhancement is active and
+        // A mixer writes to the route's proxy while routing and
         // directly to the hardware otherwise. Either destination changes here,
         // so rebuild its taps after the output has moved.
         let was_mixing = self.mixer.is_some();
         let previous = self.target.clone();
-        // Whether enhancement is wanted, not whether a route happens to be up.
+        // Whether routing is wanted, not whether a route happens to be up.
         // One lost to a coreaudiod restart is still wanted, and switching
         // straight to the hardware here is what left the virtual device
         // missing after every later output change.
@@ -445,7 +459,7 @@ impl SoundService {
                     self.playable.record_failure(&target);
                     // A running route is still playing where it was. Without
                     // one — a lost route being brought back here — start it
-                    // where it last played, rather than leave enhancement
+                    // where it last played, rather than leave the route
                     // retrying at an output that will not start.
                     if self.route.is_none() {
                         if let Some(previous) =
@@ -503,8 +517,8 @@ impl SoundService {
         }
         if !on {
             // Remove our proxy without restoring the stale device snapshot
-            // from when enhancement first started. The route may have followed
-            // a later output selection, and switching enhancement off must not
+            // from when the route first started. The route may have followed
+            // a later output selection, and bypassing DisEQ must not
             // undo that choice. Dropping still un-mutes every covered app.
             if let Some(route) = self.route.take() {
                 self.target = Some(route.target().clone());
@@ -632,7 +646,7 @@ impl SoundService {
     /// which is what the daemon does when it crashes — takes the virtual device
     /// and every device id with it, and the rebuild [`Self::follow_device_loss`]
     /// starts straight away runs before the plug-in is back, so it fails. With
-    /// nothing trying again, enhancement stayed on in the settings and off in
+    /// nothing trying again, routing stayed on in the settings and off in
     /// fact, and the panel reported the hardware as if it had been chosen that
     /// way.
     ///
