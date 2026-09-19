@@ -9,11 +9,11 @@ use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, Sel};
 use objc2::{define_class, msg_send, sel, AnyThread, DefinedClass, MainThreadOnly, Message};
 use objc2_app_kit::{
-    NSAccessibility, NSApplication, NSButton, NSColor, NSCompositingOperation, NSControl,
-    NSControlStateValueOff, NSControlStateValueOn, NSCursor, NSEvent, NSFont, NSImage, NSImageView,
-    NSLayoutAttribute, NSLayoutConstraintOrientation, NSLineBreakMode, NSSlider, NSStackView,
-    NSStackViewDistribution, NSSwitch, NSTextAlignment, NSTextField, NSTrackingArea,
-    NSTrackingAreaOptions, NSUserInterfaceLayoutOrientation, NSView,
+    NSAccessibility, NSApplication, NSBackingStoreType, NSButton, NSColor, NSCompositingOperation,
+    NSControl, NSControlStateValueOff, NSControlStateValueOn, NSCursor, NSEvent, NSFont, NSImage,
+    NSImageView, NSLayoutAttribute, NSLayoutConstraintOrientation, NSLineBreakMode, NSSlider,
+    NSStackView, NSStackViewDistribution, NSSwitch, NSTextAlignment, NSTextField, NSTrackingArea,
+    NSTrackingAreaOptions, NSUserInterfaceLayoutOrientation, NSView, NSWindow, NSWindowStyleMask,
 };
 use objc2_foundation::{
     MainThreadMarker, NSData, NSEdgeInsets, NSObject, NSPoint, NSRect, NSSize, NSString,
@@ -463,7 +463,7 @@ define_class!(
             // NSTextField is also an NSControl, even when configured as a
             // passive label. Preserve only controls that actually own an
             // interaction; labels and image views defer to the row.
-            if owns_interaction(view) {
+            if inside_interactive_control(view, self) {
                 hit
             } else {
                 (self as *const Self).cast_mut().cast()
@@ -523,6 +523,30 @@ fn owns_interaction(view: &NSView) -> bool {
         || view.downcast_ref::<NSButton>().is_some()
         || view.downcast_ref::<NSSlider>().is_some()
         || view.downcast_ref::<NSSwitch>().is_some()
+}
+
+/// Whether `view` is, or sits inside, a control that owns its own clicks,
+/// looking no further out than `row`.
+///
+/// Inside, not only is: from macOS 27 an `NSSlider` draws through a private
+/// hosting view that answers the hit test in its place, so what comes back is
+/// the slider's child. Judged on its own that child is nothing interactive, and
+/// the row would take the click — leaving every slider on a card undraggable.
+fn inside_interactive_control(view: &NSView, row: &KdRow) -> bool {
+    let row: *const NSView = (row as *const KdRow).cast();
+    let mut current = Some(view.retain());
+    while let Some(candidate) = current {
+        if std::ptr::eq(&*candidate, row) {
+            return false;
+        }
+        if owns_interaction(&candidate) {
+            return true;
+        }
+        // SAFETY: the view is retained for the duration of this call and
+        // `superview` only reads the hierarchy on the main thread.
+        current = unsafe { candidate.superview() };
+    }
+    false
 }
 
 #[derive(Default)]
@@ -611,6 +635,46 @@ pub fn run_interaction_self_test(mtm: MainThreadMarker) -> Result<(), String> {
     let hit: *mut NSView = unsafe { msg_send![surface, hitTest: nested_point] };
     if hit != (&*nested as *const NSSwitch).cast_mut().cast() {
         return Err("a clickable card intercepted its nested switch".into());
+    }
+
+    // From macOS 27 a slider draws through a private hosting view that answers
+    // the hit test in its place, so the hit lands inside the slider rather than
+    // on it — and has to be left there. The hosting view only starts answering
+    // once it is in a window, so each card goes into one; it is never shown.
+    // Both kinds of slider a card carries, because they take different paths:
+    // a subclass overriding `mouseDown:` is kept on the old one.
+    for (kind, slider) in [
+        ("slider", NSSlider::new(mtm)),
+        ("deferred slider", deferred_slider(mtm)),
+    ] {
+        let window = unsafe {
+            NSWindow::initWithContentRect_styleMask_backing_defer(
+                NSWindow::alloc(mtm),
+                NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(220.0, 44.0)),
+                NSWindowStyleMask::Borderless,
+                NSBackingStoreType::Buffered,
+                false,
+            )
+        };
+        unsafe { window.setReleasedWhenClosed(false) };
+        let content = window
+            .contentView()
+            .ok_or_else(|| "a fresh window has no content view".to_string())?;
+        let surface = clickable_surface(mtm, &slider, 11, &probe, sel!(probeClicked:), false);
+        content.addSubview(&surface);
+        pin(&surface, &content);
+        content.layoutSubtreeIfNeeded();
+        let slider_bounds = slider.bounds();
+        let slider_center = NSPoint::new(
+            slider_bounds.origin.x + slider_bounds.size.width / 2.0,
+            slider_bounds.origin.y + slider_bounds.size.height / 2.0,
+        );
+        // Hit tests take a point in the superview's coordinates.
+        let slider_point = content.convertPoint_fromView(slider_center, Some(&slider));
+        let hit: *mut NSView = unsafe { msg_send![&*surface, hitTest: slider_point] };
+        if !unsafe { hit.as_ref() }.is_some_and(|view| view.isDescendantOf(&slider)) {
+            return Err(format!("a clickable card intercepted its nested {kind}"));
+        }
     }
 
     // A rebuild replaces the hovered row with a fresh one whose highlight is
