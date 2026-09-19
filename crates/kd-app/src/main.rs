@@ -772,6 +772,20 @@ define_class!(
         fn did_finish_launching(&self, _notification: &NSNotification) {
             let mtm = self.mtm();
 
+            let panel = Panel::new(mtm);
+            panel
+                .window()
+                .setDelegate(Some(ProtocolObject::from_ref(self)));
+
+            // Probing backends touches DDC, so it happens once here rather than
+            // on every panel open.
+            let _ = self.ivars().service.set(RefCell::new(Service::start()));
+            let _ = self.ivars().sound.set(RefCell::new(SoundService::new()));
+            kd_core::protection::install();
+            // The icon goes up only now, with everything a click reaches in
+            // place. Put up first, it sat in the menu bar for the second or so
+            // the display probe and the route take, looking ready while every
+            // click queued behind them — and then replayed as open, shut, open.
             let status_bar = NSStatusBar::systemStatusBar();
             let item = status_bar.statusItemWithLength(NSVariableStatusItemLength);
             if let Some(button) = item.button(mtm) {
@@ -786,17 +800,6 @@ define_class!(
                     button.sendActionOn(NSEventMask::LeftMouseUp | NSEventMask::RightMouseUp);
                 }
             }
-
-            let panel = Panel::new(mtm);
-            panel
-                .window()
-                .setDelegate(Some(ProtocolObject::from_ref(self)));
-
-            // Probing backends touches DDC, so it happens once here rather than
-            // on every panel open.
-            let _ = self.ivars().service.set(RefCell::new(Service::start()));
-            let _ = self.ivars().sound.set(RefCell::new(SoundService::new()));
-            kd_core::protection::install();
             // The status item is retained only by this cell — dropping it would
             // take the icon out of the menu bar.
             let _ = self.ivars().status_item.set(item);

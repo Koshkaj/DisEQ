@@ -13,14 +13,31 @@
 //! harmless check — it connects to the speaker, or pulls the headphones over
 //! from another device — and those outputs do not have this failure anyway.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use kd_sys::audio;
 
 use crate::devices::Device;
+
+/// Devices whose I/O is being started right now, across every [`Playable`].
+///
+/// Process-wide because the hazard is: while `AudioDeviceStart` is waiting on a
+/// device, every other request for that device from this process waits behind
+/// it — its name, its streams, all of it. Enumerating outputs meanwhile stalled
+/// the first panel open for the full ten seconds.
+fn being_tried() -> &'static Mutex<HashSet<u32>> {
+    static BEING_TRIED: OnceLock<Mutex<HashSet<u32>>> = OnceLock::new();
+    BEING_TRIED.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+/// Whether `id`'s I/O is being tried at this moment, in which case asking it
+/// anything waits until the attempt ends.
+pub fn is_being_tried(id: u32) -> bool {
+    being_tried().lock().is_ok_and(|ids| ids.contains(&id))
+}
 
 /// How long a verdict is believed before the output is tried again. A link can
 /// come back, and one that worked can stop; neither announces it.
@@ -103,8 +120,14 @@ impl Playable {
 
             let entries = Arc::clone(&self.entries);
             let generation = Arc::clone(&self.generation);
+            if let Ok(mut ids) = being_tried().lock() {
+                ids.insert(id);
+            }
             std::thread::spawn(move || {
                 let plays = audio::io_starts(id);
+                if let Ok(mut ids) = being_tried().lock() {
+                    ids.remove(&id);
+                }
                 let changed = entries.lock().is_ok_and(|mut entries| {
                     let entry = entries.entry(id).or_default();
                     entry.checked = Some(Instant::now());

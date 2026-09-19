@@ -87,9 +87,15 @@ impl Device {
 }
 
 /// Every device with output channels, described.
+///
+/// Except any whose I/O is being tried right now: such a device answers nothing
+/// else until the attempt ends, which on one that will not start is ten
+/// seconds, and whoever asked — the panel opening, as a rule — waits with it.
+/// It is not listed until it has been tried anyway.
 pub fn outputs() -> Vec<Device> {
     audio::all_devices()
         .into_iter()
+        .filter(|id| !crate::playable::is_being_tried(*id))
         .filter(|id| audio::has_output(*id))
         .map(Device::describe)
         .collect()
