@@ -34,6 +34,15 @@ const POLL_TICKS: u32 = 8;
 /// about a second, which is what eqMac waits too.
 const SETTLE_TICKS: u32 = 30;
 
+/// Ticks before the first attempt to bring back a route that was lost, about
+/// two seconds. Each failure doubles the wait, up to [`RETRY_MAX_TICKS`].
+const RETRY_TICKS: u32 = 60;
+
+/// The longest wait between attempts, about a minute. A route that cannot start
+/// — a driver that no longer matches the app, say — is retried this rarely
+/// rather than given up on, since what cures it happens outside the app.
+const RETRY_MAX_TICKS: u32 = 1_800;
+
 /// Ticks between writes of the settings file. A slider drag changes a value
 /// thirty times a second and none of those are worth a write; a second's delay
 /// is imperceptible and the file is written on the way out anyway.
@@ -148,6 +157,10 @@ pub struct SoundService {
     /// How many routes have been started. Churn here is a rebuild loop, and a
     /// rebuild loop is silence.
     generation: u32,
+    /// Ticks left before the next attempt to bring back a lost route.
+    retry: u32,
+    /// The wait after the next failed attempt, doubling each time.
+    retry_interval: u32,
     /// Everything that outlives the process.
     config: Config,
     /// Whether `config` has changed since it was last written.
@@ -211,6 +224,8 @@ impl SoundService {
             ticks: 0,
             settle: 0,
             generation: 0,
+            retry: 0,
+            retry_interval: RETRY_TICKS,
             config,
             dirty: false,
         };
@@ -390,7 +405,12 @@ impl SoundService {
         // directly to the hardware otherwise. Either destination changes here,
         // so rebuild its taps after the output has moved.
         let was_mixing = self.mixer.is_some();
-        let moved = if self.route.is_some() {
+        // Whether enhancement is wanted, not whether a route happens to be up.
+        // One lost to a coreaudiod restart is still wanted, and switching
+        // straight to the hardware here is what left the virtual device
+        // missing after every later output change.
+        let routed = self.route.is_some() || (self.config.routing && self.availability.driver);
+        let moved = if routed {
             self.mixer = None;
             self.retarget(target)
         } else {
@@ -425,11 +445,16 @@ impl SoundService {
     /// Starts or stops routing. Returns an error to show on the card when the
     /// route refuses to start.
     pub fn set_routing(&mut self, on: bool) -> Result<(), String> {
+        // Recorded even when the route already agrees: a route that was lost
+        // reads as off, and switching it off has to stick rather than be
+        // brought back by `follow_lost_route`.
+        if self.config.routing != on {
+            self.config.routing = on;
+            self.dirty = true;
+        }
         if on == self.is_routing() {
             return Ok(());
         }
-        self.config.routing = on;
-        self.dirty = true;
         if !on {
             // Remove our proxy without restoring the stale device snapshot
             // from when enhancement first started. The route may have followed
@@ -496,6 +521,9 @@ impl SoundService {
             self.settle = self.settle.saturating_sub(POLL_TICKS);
             return;
         }
+        if self.follow_lost_route() {
+            return;
+        }
         if self.follow_device_loss() {
             return;
         }
@@ -530,6 +558,61 @@ impl SoundService {
         if device.has_output && !device.is_virtual() {
             let _ = self.retarget(device);
         }
+    }
+
+    /// Brings back a route that is wanted but not running.
+    ///
+    /// A route can go without anyone switching it off. A coreaudiod restart —
+    /// which is what the daemon does when it crashes — takes the virtual device
+    /// and every device id with it, and the rebuild [`Self::follow_device_loss`]
+    /// starts straight away runs before the plug-in is back, so it fails. With
+    /// nothing trying again, enhancement stayed on in the settings and off in
+    /// fact, and the panel reported the hardware as if it had been chosen that
+    /// way.
+    ///
+    /// Retried with a backoff rather than every poll: a start that fails can
+    /// have moved the system's output to the virtual device and back. Returns
+    /// true while there is no route, so the caller stops looking for one.
+    fn follow_lost_route(&mut self) -> bool {
+        if self.route.is_some() || !self.config.routing {
+            self.retry = 0;
+            self.retry_interval = RETRY_TICKS;
+            return false;
+        }
+        if self.retry > 0 {
+            self.retry = self.retry.saturating_sub(POLL_TICKS);
+            return true;
+        }
+
+        let started = if devices::driver_is_installed() {
+            // Ids do not survive a coreaudiod restart; the UID does.
+            self.target = self
+                .target
+                .as_ref()
+                .and_then(|target| target.uid.as_deref())
+                .and_then(devices::by_uid)
+                .filter(|device| {
+                    device.has_output && !device.is_virtual() && kd_sys::audio::is_alive(device.id)
+                })
+                .or_else(|| remembered_target(&self.config));
+            self.set_routing(true)
+        } else {
+            Err("Audio driver not installed".into())
+        };
+        if let Err(error) = started {
+            if let Some(destination) = std::env::var_os("KD_SOUND_LOG") {
+                log_line(
+                    &destination,
+                    &format!(
+                        "route lost; restart failed ({error}), next attempt in {} ticks",
+                        self.retry_interval
+                    ),
+                );
+            }
+            self.retry = self.retry_interval;
+            self.retry_interval = (self.retry_interval * 2).min(RETRY_MAX_TICKS);
+        }
+        true
     }
 
     /// Notices the virtual device being replaced underneath the route.
@@ -884,9 +967,11 @@ impl SoundService {
     }
 
     /// Whether the frame timer is still worth running. The device poll needs it
-    /// even with nothing playing, so an installed driver keeps it alive.
+    /// even with nothing playing, so an installed driver keeps it alive — and so
+    /// does a route that is wanted, since the poll is what brings a lost one
+    /// back.
     pub fn wants_ticks(&self) -> bool {
-        self.is_ramping() || self.is_routing() || self.availability.driver
+        self.is_ramping() || self.is_routing() || self.availability.driver || self.config.routing
     }
 
     /// How often [`Self::tick`] wants calling, in milliseconds. The faster of
