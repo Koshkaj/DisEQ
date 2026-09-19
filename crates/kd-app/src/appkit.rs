@@ -449,6 +449,9 @@ pub fn switch(
 pub struct RowIvars {
     hovered: Cell<bool>,
     hover_alpha: Cell<f64>,
+    /// How far the row's frame — and so its highlight — extends past its
+    /// alignment rect on either side.
+    bleed: Cell<f64>,
 }
 
 define_class!(
@@ -486,6 +489,28 @@ define_class!(
                 hit
             } else {
                 (self as *const Self).cast_mut().cast()
+            }
+        }
+
+        /// Lays the row out by a rect narrower than its frame.
+        ///
+        /// Auto Layout places a view by its alignment rect, and the row's
+        /// content is pinned to that rect too, so the content lands in the same
+        /// column as every other row. The frame is `bleed` wider on each side,
+        /// and the frame is what the highlight fills and what takes the
+        /// pointer — so the highlight has room around the text instead of
+        /// ending exactly where it does.
+        #[unsafe(method(alignmentRectInsets))]
+        fn alignment_rect_insets(&self) -> NSEdgeInsets {
+            let bleed = self.ivars().bleed.get();
+            if bleed <= 0.0 {
+                return unsafe { msg_send![super(self), alignmentRectInsets] };
+            }
+            NSEdgeInsets {
+                top: 0.0,
+                left: bleed,
+                bottom: 0.0,
+                right: bleed,
             }
         }
 
@@ -718,6 +743,88 @@ pub fn run_interaction_self_test(mtm: MainThreadMarker) -> Result<(), String> {
         return Err("a long notice was not given the height to wrap".into());
     }
 
+    // A highlighted row reaches past its content into the card's margin, so
+    // the highlight is not flush against the text, while the content stays in
+    // the column the card's other rows use. Laid out as a card lays it out: in
+    // a window, under the card's insets, beneath a row with no highlight.
+    let window = unsafe {
+        NSWindow::initWithContentRect_styleMask_backing_defer(
+            NSWindow::alloc(mtm),
+            NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(380.0, 120.0)),
+            NSWindowStyleMask::Borderless,
+            NSBackingStoreType::Buffered,
+            false,
+        )
+    };
+    unsafe { window.setReleasedWhenClosed(false) };
+    let content = window
+        .contentView()
+        .ok_or_else(|| "a fresh window has no content view".to_string())?;
+    let plain_text = label(mtm, "Brightness");
+    let plain_spacer = self::spacer(mtm);
+    let plain = hstack(mtm, theme::ROW_SPACING, &[&plain_text, &plain_spacer]);
+    let row_text = label(mtm, "MacBook Pro Speakers");
+    let row_spacer = self::spacer(mtm);
+    let row_trailing = caption(mtm, "Current");
+    let row_content = hstack(
+        mtm,
+        theme::ROW_SPACING,
+        &[&row_text, &row_spacer, &row_trailing],
+    );
+    let highlighted = clickable_row(mtm, &row_content, 12, &probe, sel!(probeClicked:));
+    let rows = vstack_filling(
+        mtm,
+        theme::ROW_SPACING,
+        theme::card_insets(),
+        &[&plain, &highlighted],
+    );
+    let framed = self::card(mtm, &rows);
+    content.addSubview(&framed);
+    framed.setTranslatesAutoresizingMaskIntoConstraints(false);
+    pin(&framed, &content);
+    content.layoutSubtreeIfNeeded();
+
+    let in_card = |view: &NSView| framed.convertRect_fromView(view.bounds(), Some(view));
+    let (plain_column, content_column, highlight) = (
+        in_card(&plain),
+        in_card(&row_content),
+        in_card(&highlighted),
+    );
+    let bleed = theme::ROW_HIGHLIGHT_BLEED;
+    let close = |a: f64, b: f64| (a - b).abs() < 0.5;
+    if !close(content_column.origin.x, plain_column.origin.x)
+        || !close(content_column.size.width, plain_column.size.width)
+    {
+        return Err("a highlighted row's content left the card's column".into());
+    }
+    if !close(highlight.origin.x, content_column.origin.x - bleed)
+        || !close(
+            highlight.size.width,
+            content_column.size.width + 2.0 * bleed,
+        )
+    {
+        return Err(format!(
+            "a row's highlight is flush with its content instead of {bleed:.0}pt past it"
+        ));
+    }
+    if !close(
+        highlighted.visibleRect().size.width,
+        highlighted.bounds().size.width,
+    ) {
+        return Err("part of a row's highlight does not respond to the pointer".into());
+    }
+    let strip = framed.convertPoint_toView(
+        NSPoint::new(
+            highlight.origin.x + bleed / 2.0,
+            highlight.origin.y + highlight.size.height / 2.0,
+        ),
+        Some(&content),
+    );
+    let hit: *mut NSView = unsafe { msg_send![&*content, hitTest: strip] };
+    if hit != Retained::as_ptr(&highlighted).cast_mut() {
+        return Err("a click beside a row's content, inside its highlight, missed the row".into());
+    }
+
     // A rebuild replaces the hovered row with a fresh one whose highlight is
     // off, and a pointer that has not moved sends no crossing event to switch
     // it back on. `sync_hover` is what restores it; this checks the placement
@@ -871,12 +978,14 @@ fn build_clickable_row(
     row.setTranslatesAutoresizingMaskIntoConstraints(false);
     if highlight {
         install_hover(&row, 0.10, theme::ROW_CORNER_RADIUS);
+        // The highlight reaches into the card's margin rather than pushing the
+        // content in, so clickable and control-only rows keep one column.
+        row.ivars().bleed.set(theme::ROW_HIGHLIGHT_BLEED);
     }
     content.setTranslatesAutoresizingMaskIntoConstraints(false);
     row.addSubview(content);
-    // Card insets already provide horizontal breathing room. Keeping click-row
-    // padding vertical-only means clickable and control-only rows share the
-    // exact same leading column.
+    // Horizontally flush with the row's alignment rect, which is where the
+    // column is; the highlight's breathing room comes from the bleed above.
     pin_with_axis_padding(content, &row, 0.0, theme::ROW_PADDING);
 
     button_into_view(Retained::into_super(row))

@@ -7,6 +7,10 @@ pub const PANEL_CORNER_RADIUS: f64 = 16.0;
 pub const CARD_CORNER_RADIUS: f64 = 10.0;
 pub const ROW_CORNER_RADIUS: f64 = 6.0;
 pub const ROW_PADDING: f64 = 4.0;
+/// How far a row's hover highlight reaches past its content on either side.
+/// Into the card's margin rather than into the row, so the content keeps the
+/// column every other row on the card uses.
+pub const ROW_HIGHLIGHT_BLEED: f64 = 6.0;
 pub const CARD_SPACING: f64 = 8.0;
 pub const ROW_SPACING: f64 = 6.0;
 /// Fixed column for leading SF Symbols. Their intrinsic widths vary, so rows
