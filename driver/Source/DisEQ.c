@@ -62,6 +62,16 @@ enum {
 /// like their own speakers.
 #define kCustomProperty_Name 'kdnm'
 
+/// Selector for the delay the app adds between this device and the hardware,
+/// in frames. Reported as the device's output latency, so a player syncing
+/// sound to picture waits for the audio that has not come out of the speakers
+/// yet rather than assuming it already has. Settable by the app only, like the
+/// name.
+#define kCustomProperty_Latency 'kdlt'
+
+/// Anything past a second is a bug on the other side, not a latency.
+#define kMaxRouteLatencyFrames 192000
+
 /// Selector for the plug-in's visibility, on the plug-in object rather than the
 /// device. The app publishes the device when it starts and takes it away when
 /// it quits, so a machine with DisEQ installed but not running looks
@@ -117,6 +127,8 @@ static _Atomic bool gMuted = false;
 static _Atomic float gVolumeScalar = 1.0f;
 /// Volume as the samples see it, chasing gVolumeScalar cubed.
 static float gAppliedGain = 1.0f;
+/// How far behind this device the hardware plays, as the app last reported it.
+static _Atomic UInt32 gRouteLatency = 0;
 
 static UInt64 gAnchorHostTime = 0;
 static _Atomic UInt64 gTimestampCount = 0;
@@ -868,6 +880,7 @@ static Boolean device_has_property(const AudioObjectPropertyAddress* address) {
         case kAudioDevicePropertyZeroTimeStampPeriod:
         case kAudioDevicePropertyIcon:
         case kCustomProperty_Name:
+        case kCustomProperty_Latency:
             return true;
         case kAudioDevicePropertyPreferredChannelsForStereo:
         case kAudioDevicePropertyPreferredChannelLayout:
@@ -923,7 +936,10 @@ static OSStatus device_get_property_data_size(const AudioObjectPropertyAddress* 
             *outSize = 2 * sizeof(AudioObjectID);
             return 0;
         case kAudioObjectPropertyCustomPropertyInfoList:
-            *outSize = sizeof(AudioServerPlugInCustomPropertyInfo);
+            *outSize = 2 * sizeof(AudioServerPlugInCustomPropertyInfo);
+            return 0;
+        case kCustomProperty_Latency:
+            *outSize = sizeof(CFPropertyListRef);
             return 0;
         case kAudioDevicePropertyTransportType:
         case kAudioDevicePropertyClockDomain:
@@ -1035,11 +1051,30 @@ static OSStatus device_get_property_data(const AudioObjectPropertyAddress* addre
                 *outDataSize = 0;
                 return 0;
             }
-            AudioServerPlugInCustomPropertyInfo* info = (AudioServerPlugInCustomPropertyInfo*)outData;
-            info[0].mSelector = kCustomProperty_Name;
-            info[0].mPropertyDataType = kAudioServerPlugInCustomPropertyDataTypeCFString;
-            info[0].mQualifierDataType = kAudioServerPlugInCustomPropertyDataTypeNone;
-            *outDataSize = sizeof(AudioServerPlugInCustomPropertyInfo);
+            AudioServerPlugInCustomPropertyInfo all[2] = {
+                {
+                    .mSelector = kCustomProperty_Name,
+                    .mPropertyDataType = kAudioServerPlugInCustomPropertyDataTypeCFString,
+                    .mQualifierDataType = kAudioServerPlugInCustomPropertyDataTypeNone,
+                },
+                {
+                    .mSelector = kCustomProperty_Latency,
+                    .mPropertyDataType = kAudioServerPlugInCustomPropertyDataTypeCFPropertyList,
+                    .mQualifierDataType = kAudioServerPlugInCustomPropertyDataTypeNone,
+                },
+            };
+            UInt32 capacity = inDataSize / sizeof(AudioServerPlugInCustomPropertyInfo);
+            UInt32 written = capacity < 2 ? capacity : 2;
+            memcpy(outData, all, written * sizeof(AudioServerPlugInCustomPropertyInfo));
+            *outDataSize = written * sizeof(AudioServerPlugInCustomPropertyInfo);
+            return 0;
+        }
+
+        case kCustomProperty_Latency: {
+            if (inDataSize < sizeof(CFPropertyListRef)) return kAudioHardwareBadPropertySizeError;
+            SInt32 frames = (SInt32)atomic_load(&gRouteLatency);
+            *((CFPropertyListRef*)outData) = CFNumberCreate(NULL, kCFNumberSInt32Type, &frames);
+            *outDataSize = sizeof(CFPropertyListRef);
             return 0;
         }
 
@@ -1072,8 +1107,17 @@ static OSStatus device_get_property_data(const AudioObjectPropertyAddress* addre
             *outDataSize = sizeof(AudioObjectID);
             return 0;
 
-        case kAudioDevicePropertyClockDomain:
         case kAudioDevicePropertyLatency:
+            // Output only: nothing is recorded through this device, so its input
+            // side adds nothing.
+            if (inDataSize < sizeof(UInt32)) return kAudioHardwareBadPropertySizeError;
+            *((UInt32*)outData) = address->mScope == kAudioObjectPropertyScopeInput
+                                      ? 0
+                                      : atomic_load(&gRouteLatency);
+            *outDataSize = sizeof(UInt32);
+            return 0;
+
+        case kAudioDevicePropertyClockDomain:
         case kAudioDevicePropertySafetyOffset:
         case kAudioDevicePropertyIsHidden:
             if (inDataSize < sizeof(UInt32)) return kAudioHardwareBadPropertySizeError;
@@ -1197,6 +1241,37 @@ static OSStatus device_set_property_data(pid_t inClientProcessID,
             if (different && host != NULL) {
                 host->RequestDeviceConfigurationChange(host, kObjectID_Device, (UInt64)requested, NULL);
             }
+            return 0;
+        }
+
+        case kCustomProperty_Latency: {
+            // Anyone may read it; only DisEQ knows what it is.
+            if (!client_is_our_app(inClientProcessID)) {
+                return kAudioHardwareIllegalOperationError;
+            }
+            if (inDataSize != sizeof(CFPropertyListRef)) return kAudioHardwareBadPropertySizeError;
+            CFPropertyListRef value = *((const CFPropertyListRef*)inData);
+            if (value == NULL || CFGetTypeID(value) != CFNumberGetTypeID()) {
+                return kAudioHardwareIllegalOperationError;
+            }
+            SInt64 requested = 0;
+            CFNumberGetValue((CFNumberRef)value, kCFNumberSInt64Type, &requested);
+            if (requested < 0 || requested > kMaxRouteLatencyFrames) {
+                return kAudioHardwareIllegalOperationError;
+            }
+            if (atomic_exchange(&gRouteLatency, (UInt32)requested) == (UInt32)requested) {
+                return 0;
+            }
+
+            // What changed is the device's latency; the custom property is only
+            // the way in. Players listen for the former.
+            changed[0].mSelector = kAudioDevicePropertyLatency;
+            changed[0].mScope = kAudioObjectPropertyScopeOutput;
+            changed[0].mElement = kAudioObjectPropertyElementMain;
+            changed[1].mSelector = kAudioDevicePropertyLatency;
+            changed[1].mScope = kAudioObjectPropertyScopeGlobal;
+            changed[1].mElement = kAudioObjectPropertyElementMain;
+            *outChangedCount = 2;
             return 0;
         }
 
@@ -1677,7 +1752,8 @@ static OSStatus kd_IsPropertySettable(AudioServerPlugInDriverRef inDriver,
 
         case kObjectID_Device:
             *outIsSettable = inAddress->mSelector == kAudioDevicePropertyNominalSampleRate
-                             || inAddress->mSelector == kCustomProperty_Name;
+                             || inAddress->mSelector == kCustomProperty_Name
+                             || inAddress->mSelector == kCustomProperty_Latency;
             return 0;
 
         case kObjectID_Stream_Input:

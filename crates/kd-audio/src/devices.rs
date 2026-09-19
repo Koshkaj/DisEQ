@@ -18,6 +18,10 @@ pub const EQMAC_UID: &str = "EQMDevice";
 /// `kCustomProperty_Name`.
 pub const CUSTOM_PROPERTY_NAME: u32 = u32::from_be_bytes(*b"kdnm");
 
+/// The custom property the app reports the route's delay through, in frames.
+/// Matches `kCustomProperty_Latency`.
+pub const CUSTOM_PROPERTY_LATENCY: u32 = u32::from_be_bytes(*b"kdlt");
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Device {
     pub id: AudioObjectId,
@@ -217,6 +221,14 @@ pub fn set_name(device: &Device, name: &str) -> bool {
     audio::set_string_property(device.id, CUSTOM_PROPERTY_NAME, name)
 }
 
+/// Tells the driver how far behind our device the hardware actually plays, so
+/// it can report that as the device's latency. Like renaming, only accepted
+/// from our own bundle ID; a driver older than this ignores it and keeps
+/// reporting zero.
+pub fn set_latency(device: &Device, frames: u32) -> bool {
+    audio::set_number_property(device.id, CUSTOM_PROPERTY_LATENCY, i64::from(frames))
+}
+
 pub fn set_default_output(device: &Device) -> bool {
     audio::set_default_output_device(device.id)
 }
@@ -242,6 +254,16 @@ mod tests {
         assert!(
             source.contains(&format!("#define kCustomProperty_Name '{fourcc}'")),
             "driver/Source/DisEQ.c no longer uses '{fourcc}' for the name property"
+        );
+    }
+
+    #[test]
+    fn the_custom_latency_selector_matches_the_driver() {
+        let source = include_str!("../../../driver/Source/DisEQ.c");
+        let fourcc = String::from_utf8(CUSTOM_PROPERTY_LATENCY.to_be_bytes().to_vec()).unwrap();
+        assert!(
+            source.contains(&format!("#define kCustomProperty_Latency '{fourcc}'")),
+            "driver/Source/DisEQ.c no longer uses '{fourcc}' for the latency property"
         );
     }
 

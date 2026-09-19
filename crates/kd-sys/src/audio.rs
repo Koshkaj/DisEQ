@@ -40,6 +40,7 @@ const NOMINAL_SAMPLE_RATE: u32 = fourcc(b"nsrt");
 const SAFETY_OFFSET: u32 = fourcc(b"saft");
 const BUFFER_FRAME_SIZE: u32 = fourcc(b"fsiz");
 const IS_ALIVE: u32 = fourcc(b"livn");
+const LATENCY: u32 = fourcc(b"ltnc");
 /// Whether any process on the machine has the device's I/O running.
 const IS_RUNNING_SOMEWHERE: u32 = fourcc(b"gone");
 /// Finds the plug-in object a bundle ID belongs to. The only way to address a
@@ -314,6 +315,36 @@ pub fn set_bool_property(object: AudioObjectId, selector: u32, value: bool) -> b
         )
     };
     status == 0
+}
+
+/// Writes a number to a property that takes a CFPropertyList — how a plug-in's
+/// custom properties carry anything that is not a string.
+pub fn set_number_property(object: AudioObjectId, selector: u32, value: i64) -> bool {
+    use objc2_core_foundation::CFNumber;
+
+    let number = CFNumber::new_i64(value);
+    let raw: *const CFNumber = &*number;
+    let address = address(selector, SCOPE_GLOBAL);
+    // SAFETY: a single CFPropertyListRef, which the plug-in reads during the
+    // call; `number` outlives it.
+    let status = unsafe {
+        AudioObjectSetPropertyData(
+            object,
+            &address,
+            0,
+            ptr::null(),
+            std::mem::size_of::<*const CFNumber>() as u32,
+            &raw as *const _ as *const c_void,
+        )
+    };
+    status == 0
+}
+
+/// Output latency the device reports, in frames — what a player adds to know
+/// when a sample it writes is actually heard.
+pub fn output_latency(device: AudioObjectId) -> Option<u32> {
+    let mut value: u32 = 0;
+    get(device, &address(LATENCY, SCOPE_OUTPUT), &mut value).then_some(value)
 }
 
 /// Output volume in 0.0..=1.0.

@@ -224,6 +224,7 @@ impl Route {
         // already applying. Turning the effects on must not change how loud the
         // machine is.
         route.apply_volume(volume, true);
+        route.report_latency();
         Ok(route)
     }
 
@@ -315,7 +316,28 @@ impl Route {
             }
         }
         self.apply_volume(volume, true);
+        self.report_latency();
         Ok(())
+    }
+
+    /// How far behind the virtual device the hardware actually plays, in
+    /// frames: the distance the reader deliberately trails the writer, plus
+    /// the hardware's own presentation latency.
+    pub fn latency(&self) -> u32 {
+        let hardware = (self.playback.output_latency() * self.rate).round();
+        let total = self.bridge.safety_offset() as f64 + hardware.max(0.0);
+        total.clamp(0.0, f64::from(u32::MAX)) as u32
+    }
+
+    /// Hands [`Self::latency`] to the driver to report as the device's own.
+    ///
+    /// Players line sound up with picture using the output device's latency,
+    /// and the virtual device used to report none — so every video played the
+    /// route's buffer, around 45 ms, behind the picture it belonged to.
+    fn report_latency(&self) {
+        if let Some(driver) = &self.driver {
+            devices::set_latency(driver, self.latency());
+        }
     }
 
     /// Stops routing without switching away from the hardware the user is

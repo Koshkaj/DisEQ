@@ -239,6 +239,14 @@ impl Playback {
         unsafe { self.engine.mainMixerNode().outputVolume() }
     }
 
+    /// How long after the engine renders a frame the hardware plays it, in
+    /// seconds: the output device's own latency, safety offset and buffering,
+    /// as Core Audio reports them for the device the engine is driving.
+    pub fn output_latency(&self) -> f64 {
+        // SAFETY: property read on the engine's own output node.
+        unsafe { self.engine.outputNode().presentationLatency() }
+    }
+
     /// One step of the drift controller. Call about [`TICKS_PER_SECOND`] times
     /// a second, from the thread that owns this object.
     ///
