@@ -443,13 +443,16 @@ impl SoundService {
                         );
                     }
                     self.playable.record_failure(&target);
-                    // Back to where it was playing, rather than leaving nothing
-                    // routed — and, with enhancement still wanted, the lost
-                    // route retried at an output that will not start.
-                    if let Some(previous) =
-                        previous.filter(|previous| !self.playable.failed(previous))
-                    {
-                        let _ = self.retarget(previous);
+                    // A running route is still playing where it was. Without
+                    // one — a lost route being brought back here — start it
+                    // where it last played, rather than leave enhancement
+                    // retrying at an output that will not start.
+                    if self.route.is_none() {
+                        if let Some(previous) =
+                            previous.filter(|previous| !self.playable.failed(previous))
+                        {
+                            let _ = self.restart(previous);
+                        }
                     }
                     // The underlying error is an NSError code, which says
                     // nothing to anyone reading the card.
@@ -529,12 +532,32 @@ impl SoundService {
         }
     }
 
-    /// Moves a running route to another piece of hardware.
+    /// Moves the route to another piece of hardware, starting one if there is
+    /// none.
     ///
-    /// The old route is dropped first: two global taps at once is one tap too
-    /// many, and the gap costs a few milliseconds of audio rather than the
-    /// double-muting the overlap would cause.
+    /// A running route keeps its virtual device and only moves its playback —
+    /// see [`Route::retarget`] for what rebuilding it instead did to the
+    /// applications playing through it. On failure it keeps playing where it
+    /// was, and `target` is left alone.
     fn retarget(&mut self, target: Device) -> Result<(), String> {
+        let Some(route) = self.route.as_mut() else {
+            return self.restart(target);
+        };
+        route.retarget(&target).map_err(|error| error.to_string())?;
+        self.volume = f64::from(route.volume());
+        self.remember_target(&target);
+        self.target = Some(target);
+        self.settle = SETTLE_TICKS;
+        self.generation += 1;
+        Ok(())
+    }
+
+    /// Tears the route down and builds a new one, virtual device and all.
+    ///
+    /// Only for when the device itself is the problem — the one the route
+    /// holds has been retracted and republished underneath it. Anything else
+    /// wants [`Self::retarget`], which applications do not notice.
+    fn restart(&mut self, target: Device) -> Result<(), String> {
         self.route = None;
         self.target = Some(target.clone());
         match Route::start(&target, *self.equalizer.target(), self.volume as f32) {
@@ -595,7 +618,7 @@ impl SoundService {
             // system is pointed at the one we are not writing to. Everything
             // the panel and the menu bar do lands on the wrong object.
             let target = route.target().clone();
-            let _ = self.retarget(target);
+            let _ = self.restart(target);
             return;
         }
         if device.has_output && !device.is_virtual() {
@@ -683,7 +706,7 @@ impl SoundService {
             return false;
         }
         let target = route.target().clone();
-        let _ = self.retarget(target);
+        let _ = self.restart(target);
         true
     }
 

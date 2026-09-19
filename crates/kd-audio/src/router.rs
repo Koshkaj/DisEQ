@@ -231,6 +231,93 @@ impl Route {
         &self.target
     }
 
+    /// Moves playback to other hardware, keeping the virtual device.
+    ///
+    /// The device stays published, and stays the system's output, the whole
+    /// way through; only the engine draining it is replaced. Applications never
+    /// see a thing. Rebuilding the route instead retracted the device every
+    /// application was playing to and handed the system's output back to
+    /// whatever it was on before the route first started — and a browser that
+    /// loses its device re-resolves the default once, lands on that stale
+    /// hardware, and stays there. On a monitor with no speakers that is
+    /// silence, with the panel reporting the output the user picked.
+    ///
+    /// The new engine is running before the old one is stopped, so a failure
+    /// leaves the route playing where it was.
+    pub fn retarget(&mut self, target: &Device) -> Result<(), RouteError> {
+        if target.is_virtual() {
+            return Err(RouteError::WouldLoop);
+        }
+        if !target.has_output {
+            return Err(RouteError::NoHardwareOutput);
+        }
+
+        let rate = target
+            .sample_rate
+            .filter(|rate| *rate > 0.0)
+            .unwrap_or(48_000.0);
+        // As at start: the hardware's own volume where it has one, so moving
+        // between outputs does not change how loud the machine is.
+        let volume = target
+            .volume_is_settable
+            .then(|| audio::volume(target.id))
+            .flatten()
+            .map(|volume| volume as f32)
+            .unwrap_or(self.device_volume)
+            .clamp(0.0, 1.0);
+
+        // The stand-in runs at the rate of the hardware it stands in for, and
+        // the ring then carries that rate too.
+        let input_rate = match &self.driver {
+            Some(driver) => {
+                if audio::nominal_sample_rate(driver.id) != Some(rate) {
+                    audio::set_nominal_sample_rate(driver.id, rate);
+                }
+                rate
+            }
+            None => self.shared.sample_rate().max(rate),
+        };
+
+        let bridge = Arc::new(Bridge::new(
+            format::CHANNELS,
+            (rate * RING_SECONDS) as usize,
+        ));
+        bridge.set_safety_offset(safety_offset(target));
+        let playback = Playback::start(
+            target,
+            input_rate,
+            Arc::clone(&bridge),
+            Arc::clone(&self.shared),
+            1.0,
+            &self.settings,
+        )?;
+
+        // Dropping the old engine stops it; the new one is already playing.
+        self.playback = playback;
+        std::mem::replace(&mut self.bridge, bridge).reset();
+        self.target = target.clone();
+        self.rate = rate;
+        // Stopping the route now goes back to the hardware the user picked, not
+        // to whatever the system was on before the route started.
+        self.previous = PreviousDefaults {
+            output: Some(target.id),
+            system: Some(target.id),
+        };
+
+        if let Some(driver) = &self.driver {
+            devices::set_name(driver, &devices::proxy_name(&target.name));
+            // Moved off it in Sound settings, which is one of the ways to get
+            // here: the device only carries anything while it is the output.
+            if audio::default_output_device() != Some(driver.id) {
+                let (took, status) = claim_default(driver);
+                self.claimed = took;
+                self.claim_status = status;
+            }
+        }
+        self.apply_volume(volume, true);
+        Ok(())
+    }
+
     /// Stops routing without switching away from the hardware the user is
     /// currently hearing.
     ///
