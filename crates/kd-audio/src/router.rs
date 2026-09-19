@@ -321,11 +321,19 @@ impl Route {
     }
 
     /// How far behind the virtual device the hardware actually plays, in
-    /// frames: the distance the reader deliberately trails the writer, plus
-    /// the hardware's own presentation latency.
+    /// frames: the distance the reader deliberately trails the writer, how far
+    /// ahead of the hardware the engine renders, and the hardware's own
+    /// latency after that.
+    ///
+    /// The lead is its own term because `presentationLatency` leaves it out:
+    /// it covers the device's and stream's latency only, and on the Scarlett
+    /// that is 14 frames of a delay that is really 540 — one 512-frame I/O
+    /// buffer and a 14-frame safety offset ahead of it.
     pub fn latency(&self) -> u32 {
+        let lead = audio::buffer_frame_size(self.target.id, true).unwrap_or(0)
+            + audio::safety_offset(self.target.id, true).unwrap_or(0);
         let hardware = (self.playback.output_latency() * self.rate).round();
-        let total = self.bridge.safety_offset() as f64 + hardware.max(0.0);
+        let total = self.bridge.safety_offset() as f64 + f64::from(lead) + hardware.max(0.0);
         total.clamp(0.0, f64::from(u32::MAX)) as u32
     }
 
