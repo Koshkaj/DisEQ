@@ -6,7 +6,7 @@ mod state;
 mod theme;
 mod views;
 
-use std::cell::{OnceCell, RefCell};
+use std::cell::{Cell, OnceCell, RefCell};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -120,6 +120,11 @@ struct Ivars {
     /// Turns a reconfiguration CoreGraphics already noticed into a redraw,
     /// without waiting for the watchdog's slower sweep.
     reconfig: RefCell<Option<Retained<NSTimer>>>,
+    /// The resolution a drag on the slider last landed on — display index and
+    /// mode — waiting for the mouse button to come up before it is applied.
+    resolution_pending: Cell<Option<(usize, usize)>>,
+    /// Watches for that button, while a resolution is pending.
+    resolution_release: RefCell<Option<Retained<NSTimer>>>,
 }
 
 /// Rows carry their identity in the view tag; anything else is not a row.
@@ -571,18 +576,32 @@ define_class!(
                 appkit::set_slider_caption_and_readout(control, &caption, &readout);
             }
 
-            // Mouse tracking gets one explicit commit from KDDeferredSlider
-            // after mouse-up. Keyboard and accessibility actions have no such
-            // tracking loop, so commit those immediately.
-            if !appkit::deferred_slider_is_tracking(control) {
-                self.commit_resolution(control);
+            // A drag only previews: switching modes reconfigures the window
+            // server, which is too much to do for every step the knob passes.
+            // The mode it lands on is applied once the button comes up. The
+            // slider does not say when that is — it sends nothing on release,
+            // and the subclass that used to catch the release stopped getting
+            // the press at all on macOS 27 — so the button is watched instead.
+            // Keyboard and accessibility changes have no button, and apply now.
+            if appkit::mouse_is_down() {
+                self.ivars().resolution_pending.set(Some((index, choice)));
+                self.watch_for_resolution_release();
+            } else {
+                self.commit_resolution(index, choice);
             }
         }
 
-        #[unsafe(method(resolutionCommitted:))]
-        fn resolution_committed(&self, sender: Option<&AnyObject>) {
-            let Some(control) = control(sender) else { return };
-            self.commit_resolution(control);
+        #[unsafe(method(resolutionReleased:))]
+        fn resolution_released(&self, _sender: Option<&AnyObject>) {
+            if appkit::mouse_is_down() {
+                return;
+            }
+            if let Some(timer) = self.ivars().resolution_release.borrow_mut().take() {
+                timer.invalidate();
+            }
+            if let Some((index, choice)) = self.ivars().resolution_pending.take() {
+                self.commit_resolution(index, choice);
+            }
         }
 
         #[unsafe(method(connectToggled:))]
@@ -1122,9 +1141,30 @@ impl AppDelegate {
         Some((caption.to_string(), readout))
     }
 
-    fn commit_resolution(&self, control: &NSControl) {
-        let (index, _) = views::decode_tag(control.tag());
-        let choice = control.doubleValue().round() as usize;
+    /// How often to look for the mouse button coming up after a drag on the
+    /// resolution slider. Short enough that the mode follows the release at
+    /// once; it only runs while a drag is in progress.
+    const RESOLUTION_RELEASE_SECONDS: f64 = 0.05;
+
+    fn watch_for_resolution_release(&self) {
+        if self.ivars().resolution_release.borrow().is_some() {
+            return;
+        }
+        // SAFETY: the timer targets this delegate, which lives as long as the
+        // application, and is invalidated once the release is seen.
+        let timer = unsafe {
+            NSTimer::scheduledTimerWithTimeInterval_target_selector_userInfo_repeats(
+                Self::RESOLUTION_RELEASE_SECONDS,
+                self,
+                sel!(resolutionReleased:),
+                None,
+                true,
+            )
+        };
+        *self.ivars().resolution_release.borrow_mut() = Some(timer);
+    }
+
+    fn commit_resolution(&self, index: usize, choice: usize) {
         let display = self
             .ivars()
             .catalog

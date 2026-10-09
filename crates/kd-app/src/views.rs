@@ -226,7 +226,6 @@ fn brightness_row(
         tag(index, 0),
         target,
         sel!(brightnessChanged:),
-        true,
     )
 }
 
@@ -249,7 +248,6 @@ fn resolution_row(
             0,
             target,
             sel!(resolutionPreview:),
-            false,
         );
     };
 
@@ -275,10 +273,9 @@ fn resolution_row(
         modes.len() > 1,
         tag(index, 0),
         target,
+        // Previews while the button is held; `main` applies the mode once,
+        // when it comes up, so the window server reconfigures only once.
         sel!(resolutionPreview:),
-        // Preview continuously, but use a deferred slider so WindowServer is
-        // reconfigured only once after mouse-up.
-        false,
     );
     if let Some(slider) = find_slider(&row) {
         slider.setNumberOfTickMarks(modes.len() as isize);
@@ -301,7 +298,6 @@ fn slider_row(
     tag_value: isize,
     target: &AnyObject,
     action: Sel,
-    continuous: bool,
 ) -> Retained<NSView> {
     let caption_label = appkit::caption(mtm, caption);
     let spacer = appkit::spacer(mtm);
@@ -312,17 +308,11 @@ fn slider_row(
         &[&caption_label, &spacer, &value_label],
     );
 
-    let slider = if continuous {
-        NSSlider::new(mtm)
-    } else {
-        appkit::deferred_slider(mtm)
-    };
+    let slider = NSSlider::new(mtm);
     slider.setMinValue(min);
     slider.setMaxValue(max);
     slider.setDoubleValue(position);
     slider.setEnabled(enabled);
-    // Deferred sliders also send continuously; their subclass adds a distinct
-    // commit action after tracking finishes.
     slider.setContinuous(true);
     slider.setTag(tag_value);
     unsafe {
@@ -864,7 +854,6 @@ fn master_volume_row(
         master_volume_tag(),
         target,
         sel!(volumeChanged:),
-        true,
     )
 }
 

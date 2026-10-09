@@ -11,13 +11,14 @@ use objc2::{define_class, msg_send, sel, AnyThread, DefinedClass, MainThreadOnly
 use objc2_app_kit::{
     NSAccessibility, NSApplication, NSBackingStoreType, NSButton, NSColor, NSCompositingOperation,
     NSControl, NSControlSize, NSControlStateValueOff, NSControlStateValueOn, NSCursor, NSEvent,
-    NSFont, NSImage, NSImageView, NSLayoutAttribute, NSLayoutConstraintOrientation,
-    NSLineBreakMode, NSSlider, NSStackView, NSStackViewDistribution, NSSwitch, NSTextAlignment,
-    NSTextField, NSTrackingArea, NSTrackingAreaOptions, NSUserInterfaceLayoutOrientation, NSView,
-    NSWindow, NSWindowStyleMask,
+    NSEventMask, NSEventModifierFlags, NSEventType, NSFont, NSImage, NSImageView,
+    NSLayoutAttribute, NSLayoutConstraintOrientation, NSLineBreakMode, NSSlider, NSStackView,
+    NSStackViewDistribution, NSSwitch, NSTextAlignment, NSTextField, NSTrackingArea,
+    NSTrackingAreaOptions, NSUserInterfaceLayoutOrientation, NSView, NSWindow, NSWindowStyleMask,
 };
 use objc2_foundation::{
-    MainThreadMarker, NSData, NSEdgeInsets, NSObject, NSPoint, NSRect, NSSize, NSString,
+    MainThreadMarker, NSData, NSDefaultRunLoopMode, NSEdgeInsets, NSObject, NSPoint, NSRect,
+    NSSize, NSString,
 };
 use objc2_quartz_core::CATransaction;
 
@@ -280,56 +281,6 @@ pub fn spacer(mtm: MainThreadMarker) -> Retained<NSView> {
 }
 
 // --- controls ---------------------------------------------------------------
-
-#[derive(Default)]
-pub struct DeferredSliderIvars {
-    tracking: Cell<bool>,
-}
-
-define_class!(
-    // SAFETY:
-    // - NSSlider supports subclassing and imposes no extra initialization.
-    // - KDDeferredSlider has no resources requiring Drop.
-    #[unsafe(super(NSSlider))]
-    #[thread_kind = MainThreadOnly]
-    #[name = "KDDeferredSlider"]
-    #[ivars = DeferredSliderIvars]
-    pub struct DeferredSlider;
-
-    impl DeferredSlider {
-        /// Let NSSlider deliver its normal continuous preview actions while it
-        /// tracks, then send one separate commit action after mouse-up.
-        #[unsafe(method(mouseDown:))]
-        fn mouse_down(&self, event: &NSEvent) {
-            self.ivars().tracking.set(true);
-            unsafe { msg_send![super(self), mouseDown: event] }
-            self.ivars().tracking.set(false);
-            let Some(target) = self.target() else { return };
-            let app = NSApplication::sharedApplication(self.mtm());
-            unsafe {
-                app.sendAction_to_from(
-                    sel!(resolutionCommitted:),
-                    Some(&target),
-                    Some(self),
-                )
-            };
-        }
-    }
-);
-
-/// A slider that previews continuously but performs its expensive operation
-/// only once, after mouse-up.
-pub fn deferred_slider(mtm: MainThreadMarker) -> Retained<NSSlider> {
-    let slider = DeferredSlider::alloc(mtm).set_ivars(DeferredSliderIvars::default());
-    let slider: Retained<DeferredSlider> = unsafe { msg_send![super(slider), init] };
-    Retained::into_super(slider)
-}
-
-pub fn deferred_slider_is_tracking(slider: &NSControl) -> bool {
-    slider
-        .downcast_ref::<DeferredSlider>()
-        .is_some_and(|slider| slider.ivars().tracking.get())
-}
 
 /// Horizontal stack whose children are all the same width.
 ///
@@ -697,16 +648,14 @@ pub fn run_interaction_self_test(mtm: MainThreadMarker) -> Result<(), String> {
         return Err("a clickable card intercepted its nested switch".into());
     }
 
-    // From macOS 27 a slider draws through a private hosting view that answers
-    // the hit test in its place, so the hit lands inside the slider rather than
-    // on it — and has to be left there. The hosting view only starts answering
-    // once it is in a window, so each card goes into one; it is never shown.
-    // Both kinds of slider a card carries, because they take different paths:
-    // a subclass overriding `mouseDown:` is kept on the old one.
-    for (kind, slider) in [
-        ("slider", NSSlider::new(mtm)),
-        ("deferred slider", deferred_slider(mtm)),
-    ] {
+    // From macOS 27 a slider draws through a private hosting view, and a press
+    // on it has to get through the card around it to that view. Pressed and
+    // dragged here with real events, because hit-testing alone is not enough:
+    // the resolution slider was a subclass overriding `mouseDown:`, which put
+    // it back on the old path — the hit test still named the slider, but the
+    // press never reached it and went to the card, which collapsed. Every
+    // slider is a plain `NSSlider` now; this keeps it that way.
+    {
         let window = unsafe {
             NSWindow::initWithContentRect_styleMask_backing_defer(
                 NSWindow::alloc(mtm),
@@ -720,20 +669,58 @@ pub fn run_interaction_self_test(mtm: MainThreadMarker) -> Result<(), String> {
         let content = window
             .contentView()
             .ok_or_else(|| "a fresh window has no content view".to_string())?;
+        let slider = NSSlider::new(mtm);
+        slider.setMaxValue(1.0);
+        slider.setDoubleValue(1.0);
         let surface = clickable_surface(mtm, &slider, 11, &probe, sel!(probeClicked:), false);
         content.addSubview(&surface);
         pin(&surface, &content);
         content.layoutSubtreeIfNeeded();
-        let slider_bounds = slider.bounds();
-        let slider_center = NSPoint::new(
-            slider_bounds.origin.x + slider_bounds.size.width / 2.0,
-            slider_bounds.origin.y + slider_bounds.size.height / 2.0,
+        // The slider only handles a press in a window that is on screen. Put
+        // far outside every display, it is on screen without being seen.
+        window.setFrameOrigin(NSPoint::new(-30_000.0, -30_000.0));
+        window.orderFrontRegardless();
+        content.displayIfNeeded();
+        let collapses_before = probe.ivars().calls.get();
+
+        let bounds = slider.bounds();
+        let press = slider.convertPoint_toView(
+            NSPoint::new(bounds.size.width * 0.25, bounds.size.height / 2.0),
+            None,
         );
-        // Hit tests take a point in the superview's coordinates.
-        let slider_point = content.convertPoint_fromView(slider_center, Some(&slider));
-        let hit: *mut NSView = unsafe { msg_send![&*surface, hitTest: slider_point] };
-        if !unsafe { hit.as_ref() }.is_some_and(|view| view.isDescendantOf(&slider)) {
-            return Err(format!("a clickable card intercepted its nested {kind}"));
+        let release = NSPoint::new(press.x + 10.0, press.y);
+        let app = NSApplication::sharedApplication(mtm);
+        let mouse = |kind: NSEventType, at: NSPoint| -> Result<Retained<NSEvent>, String> {
+            NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure(
+                kind, at, NSEventModifierFlags::empty(), 0.0, window.windowNumber(), None, 0, 1, 1.0,
+            )
+            .ok_or_else(|| "could not make a mouse event".to_string())
+        };
+        let (down, drag, up) = (
+            mouse(NSEventType::LeftMouseDown, press)?,
+            mouse(NSEventType::LeftMouseDragged, release)?,
+            mouse(NSEventType::LeftMouseUp, release)?,
+        );
+        // Queued first, so a tracking loop started by the press finds them.
+        app.postEvent_atStart(&drag, false);
+        app.postEvent_atStart(&up, false);
+        window.sendEvent(&down);
+        // Whatever the press did not consume is delivered the way the app would.
+        while let Some(event) = app.nextEventMatchingMask_untilDate_inMode_dequeue(
+            NSEventMask::Any,
+            None,
+            unsafe { NSDefaultRunLoopMode },
+            true,
+        ) {
+            app.sendEvent(&event);
+        }
+
+        window.orderOut(None);
+        if probe.ivars().calls.get() != collapses_before {
+            return Err("a press on a slider went to the card around it".into());
+        }
+        if slider.doubleValue() >= 1.0 {
+            return Err("a slider inside a clickable card did not move when dragged".into());
         }
     }
 
