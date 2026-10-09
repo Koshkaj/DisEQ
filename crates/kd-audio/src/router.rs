@@ -19,6 +19,7 @@
 //! was a virtual device.
 
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use kd_sys::audio;
 
@@ -33,6 +34,11 @@ use crate::shared::{SharedError, SharedRing};
 /// it costs 384 KB per second at 48 kHz stereo, and having it means a stalled
 /// reader recovers instead of hearing a hole.
 const RING_SECONDS: f64 = 2.0;
+
+/// The least time between two attempts to put the engine back on the route's
+/// hardware. One normally succeeds at once; this only keeps a device that
+/// cannot start from being retried on every frame.
+const REPAIR_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Added to the measured safety offset. Both devices report what they need in
 /// the steady state; this covers the first few buffers, when neither is in one.
@@ -111,6 +117,8 @@ pub struct Route {
     /// the bridge on demand: reading the meter resets it, so exactly one
     /// reader may do it.
     level: f32,
+    /// When the engine was last found off the route's hardware and rebuilt.
+    last_repair: Option<Instant>,
 }
 
 impl Route {
@@ -218,6 +226,7 @@ impl Route {
             rate,
             settings,
             level: 0.0,
+            last_repair: None,
         };
         // Stage the volume through the one place that knows where it belongs,
         // rather than leaving the mixer holding a copy of a gain the hardware is
@@ -279,6 +288,18 @@ impl Route {
             None => self.shared.sample_rate().max(rate),
         };
 
+        // Taken back before the new engine exists, as `start` does. Moved off
+        // it in Sound settings is one of the ways to get here, and the device
+        // only carries anything while it is the output — but an engine running
+        // when the default changes follows the change onto it.
+        if let Some(driver) = &self.driver {
+            if audio::default_output_device() != Some(driver.id) {
+                let (took, status) = claim_default(driver);
+                self.claimed = took;
+                self.claim_status = status;
+            }
+        }
+
         let bridge = Arc::new(Bridge::new(
             format::CHANNELS,
             (rate * RING_SECONDS) as usize,
@@ -307,13 +328,6 @@ impl Route {
 
         if let Some(driver) = &self.driver {
             devices::set_name(driver, &devices::proxy_name(&target.name));
-            // Moved off it in Sound settings, which is one of the ways to get
-            // here: the device only carries anything while it is the output.
-            if audio::default_output_device() != Some(driver.id) {
-                let (took, status) = claim_default(driver);
-                self.claimed = took;
-                self.claim_status = status;
-            }
         }
         self.apply_volume(volume, true);
         self.report_latency();
@@ -472,6 +486,7 @@ impl Route {
     /// One step of the drift controller. Call about
     /// [`crate::playback::TICKS_PER_SECOND`] times a second.
     pub fn tick(&mut self) -> Health {
+        self.keep_on_target();
         let rate = self.playback.tick();
         self.level = self.bridge.take_peak();
         self.volume_changed = self.follow_device_volume();
@@ -489,6 +504,45 @@ impl Route {
     /// The volume the last tick picked up from the virtual device, if it moved.
     pub fn volume_changed(&self) -> Option<f32> {
         self.volume_changed
+    }
+
+    /// Puts playback back on the route's hardware when the engine has left it.
+    ///
+    /// `AVAudioEngine` re-binds its output to the system's default device
+    /// whenever that changes, whatever device it was pointed at — through the
+    /// output unit or through `AUAudioUnit` alike. The default is our own
+    /// virtual device by design, so switching the system output away from it
+    /// and back, from the sound menu, moved the engine onto it: everything
+    /// went round in a loop through the virtual device, and the hardware fell
+    /// silent. Nothing prevents the move, but the output unit reports it, so
+    /// it is caught here, on the next frame, and the engine rebuilt where it
+    /// belongs.
+    ///
+    /// Only that move. One onto other hardware is the engine following a
+    /// device the user picked, which `SoundService` follows too and makes the
+    /// route's own — undoing it here, a frame sooner, took the system output
+    /// back from the user before their choice could be seen.
+    fn keep_on_target(&mut self) {
+        let Some(driver) = self.driver.as_ref().map(|driver| driver.id) else {
+            return;
+        };
+        if self.playback.output_device() != Some(driver) {
+            return;
+        }
+        // Hardware that has gone is `SoundService`'s to replace; an engine
+        // started on it would wait out a device that will not run.
+        if !audio::is_alive(self.target.id) {
+            return;
+        }
+        if self
+            .last_repair
+            .is_some_and(|last| last.elapsed() < REPAIR_INTERVAL)
+        {
+            return;
+        }
+        self.last_repair = Some(Instant::now());
+        let target = self.target.clone();
+        let _ = self.retarget(&target);
     }
 
     /// The rate the route was built for — the hardware's.

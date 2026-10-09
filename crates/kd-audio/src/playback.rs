@@ -25,7 +25,8 @@ use objc2::rc::Retained;
 use objc2::runtime::Bool;
 use objc2::AnyThread;
 use objc2_audio_toolbox::{
-    kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Output, AudioUnitSetProperty,
+    kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Output, AudioUnitGetProperty,
+    AudioUnitSetProperty,
 };
 use objc2_avf_audio::{
     AVAudioEngine, AVAudioFormat, AVAudioFrameCount, AVAudioSourceNode, AVAudioUnitVarispeed,
@@ -237,6 +238,31 @@ impl Playback {
     pub fn volume(&self) -> f32 {
         // SAFETY: property read.
         unsafe { self.engine.mainMixerNode().outputVolume() }
+    }
+
+    /// The device the engine is playing to right now, read back from its output
+    /// unit rather than remembered.
+    pub fn output_device(&self) -> Option<u32> {
+        // SAFETY: a property read on the engine's own output unit, into a
+        // buffer exactly the size it declares.
+        unsafe {
+            let node = self.engine.outputNode();
+            let unit = unit::audio_unit(&*node);
+            if unit.is_null() {
+                return None;
+            }
+            let mut device: u32 = 0;
+            let mut size = std::mem::size_of::<u32>() as u32;
+            let status = AudioUnitGetProperty(
+                unit,
+                kAudioOutputUnitProperty_CurrentDevice,
+                kAudioUnitScope_Output,
+                0,
+                NonNull::from(&mut device).cast(),
+                NonNull::from(&mut size),
+            );
+            (status == 0).then_some(device)
+        }
     }
 
     /// How long after the engine renders a frame the hardware plays it, in
