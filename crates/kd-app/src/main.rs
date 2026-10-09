@@ -194,17 +194,8 @@ define_class!(
         #[unsafe(method(toggleCard:))]
         fn toggle_card(&self, sender: Option<&AnyObject>) {
             let Some(tag) = row_tag(sender) else { return };
-            {
-                let mut state = self.ivars().state.borrow_mut();
-                // The sound card shares this caret, and its tag carries no
-                // display index to decode.
-                if views::decode_sound_tag(tag).is_some() {
-                    state.sound_expanded = !state.sound_expanded;
-                } else {
-                    let (index, _) = views::decode_tag(tag);
-                    state.toggle_expanded(index);
-                }
-            }
+            let (index, _) = views::decode_tag(tag);
+            self.ivars().state.borrow_mut().toggle_expanded(index);
             self.rebuild();
         }
 
@@ -234,10 +225,7 @@ define_class!(
         #[unsafe(method(toggleSoundCard:))]
         fn toggle_sound_card(&self, _sender: Option<&AnyObject>) {
             let Some(sound) = self.sound() else { return };
-            let open = sound.borrow_mut().toggle_sound_card();
-            if !open {
-                self.ivars().state.borrow_mut().sound_expanded = false;
-            }
+            sound.borrow_mut().toggle_sound_card();
             self.rebuild();
         }
 

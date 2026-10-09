@@ -695,17 +695,16 @@ fn sound_card(
         );
     }
 
+    // Open is fully open: the volume and every switch at once. A caret
+    // between the two asked for a second click to reach what opening the card
+    // was for.
     rows.push(master_volume_row(mtm, sound, target));
-
-    if state.sound_expanded {
-        rows.extend(sound_rows(mtm, sound, target));
-    }
+    rows.extend(sound_rows(mtm, sound, target));
 
     if let Some(notice) = state.sound_notice.as_deref() {
         rows.push(note_row(mtm, notice));
     }
 
-    rows.push(caret_row(mtm, state.sound_expanded, sound_tag(0), target));
     let card = card_from_rows(mtm, &rows);
     appkit::clickable_surface(
         mtm,
@@ -717,8 +716,8 @@ fn sound_card(
     )
 }
 
-/// The switches, the fader bank and the app strip — everything behind the
-/// caret.
+/// The switches, the fader bank and the app strip — everything below the
+/// volume.
 fn sound_rows(
     mtm: MainThreadMarker,
     sound: &SoundService,
