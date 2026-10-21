@@ -408,7 +408,11 @@ impl Route {
         let volume = volume.clamp(0.0, 1.0);
         if self.target.volume_is_settable {
             audio::set_volume(self.target.id, f64::from(volume));
-            self.playback.set_volume(1.0);
+            // A hardware volume of zero is its quietest step, not silence —
+            // −63.5 dB on the built-in speakers, and audible. Silence at zero,
+            // muted included, has to come from the mixer.
+            self.playback
+                .set_volume(if volume > 0.0 { 1.0 } else { 0.0 });
         } else {
             self.playback.set_volume(volume);
         }
