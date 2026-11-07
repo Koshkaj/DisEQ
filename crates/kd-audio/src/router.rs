@@ -40,6 +40,11 @@ const RING_SECONDS: f64 = 2.0;
 /// cannot start from being retried on every frame.
 const REPAIR_INTERVAL: Duration = Duration::from_secs(1);
 
+/// How long the input is held where it was after the output is taken. Control
+/// Center's reaction lands within tens of milliseconds; this is for a busy
+/// machine, and short because a hold is an input the user cannot change.
+const INPUT_HOLD: Duration = Duration::from_millis(1500);
+
 /// Added to the measured safety offset. Both devices report what they need in
 /// the steady state; this covers the first few buffers, when neither is in one.
 const SAFETY_MARGIN: i64 = 512;
@@ -119,6 +124,13 @@ pub struct Route {
     level: f32,
     /// When the engine was last found off the route's hardware and rebuilt.
     last_repair: Option<Instant>,
+    /// The default input as of the last tick, and whether the output was ours
+    /// then: what to put back, and the moment to start. See
+    /// [`Self::keep_input`].
+    last_input: Option<u32>,
+    output_was_ours: bool,
+    /// The input being kept in place, and until when.
+    held_input: Option<(u32, Instant)>,
 }
 
 impl Route {
@@ -158,6 +170,9 @@ impl Route {
 
         let mut claimed = false;
         let mut claim_status = 0;
+        // Read before the output is taken, so the first tick has the input it
+        // may have to put back.
+        let last_input = audio::default_input_device();
         if let Some(driver) = &driver {
             devices::set_name(driver, &devices::proxy_name(&target.name));
             // A stand-in that runs at another rate than the device it stands in
@@ -227,6 +242,9 @@ impl Route {
             settings,
             level: 0.0,
             last_repair: None,
+            last_input,
+            output_was_ours: false,
+            held_input: None,
         };
         // Stage the volume through the one place that knows where it belongs,
         // rather than leaving the mixer holding a copy of a gain the hardware is
@@ -293,6 +311,10 @@ impl Route {
         // only carries anything while it is the output — but an engine running
         // when the default changes follows the change onto it.
         if let Some(driver) = &self.driver {
+            // Renamed first: Control Center reads the name as the output
+            // changes and keeps it. Renamed after the claim, it went on
+            // showing the hardware the route had just left.
+            devices::set_name(driver, &devices::proxy_name(&target.name));
             if audio::default_output_device() != Some(driver.id) {
                 let (took, status) = claim_default(driver);
                 self.claimed = took;
@@ -305,14 +327,23 @@ impl Route {
             (rate * RING_SECONDS) as usize,
         ));
         bridge.set_safety_offset(safety_offset(target));
-        let playback = Playback::start(
+        let playback = match Playback::start(
             target,
             input_rate,
             Arc::clone(&bridge),
             Arc::clone(&self.shared),
             1.0,
             &self.settings,
-        )?;
+        ) {
+            Ok(playback) => playback,
+            Err(error) => {
+                // Still playing where it was, so it keeps that name.
+                if let Some(driver) = &self.driver {
+                    devices::set_name(driver, &devices::proxy_name(&self.target.name));
+                }
+                return Err(error.into());
+            }
+        };
 
         // Dropping the old engine stops it; the new one is already playing.
         self.playback = playback;
@@ -326,9 +357,6 @@ impl Route {
             system: Some(target.id),
         };
 
-        if let Some(driver) = &self.driver {
-            devices::set_name(driver, &devices::proxy_name(&target.name));
-        }
         self.apply_volume(volume, true);
         self.report_latency();
         Ok(())
@@ -434,6 +462,17 @@ impl Route {
         self.claimed
     }
 
+    /// Takes the system's output back for the virtual device, without touching
+    /// the engine — for when the user picks the route's own hardware directly,
+    /// which it is already playing to.
+    pub fn reclaim(&mut self) {
+        if let Some(driver) = &self.driver {
+            let (took, status) = claim_default(driver);
+            self.claimed = took;
+            self.claim_status = status;
+        }
+    }
+
     /// Why it is not, when it is not. Core Audio's four-character status code.
     pub fn claim_status(&self) -> i32 {
         self.claim_status
@@ -491,6 +530,7 @@ impl Route {
     /// [`crate::playback::TICKS_PER_SECOND`] times a second.
     pub fn tick(&mut self) -> Health {
         self.keep_on_target();
+        self.keep_input();
         let rate = self.playback.tick();
         self.level = self.bridge.take_peak();
         self.volume_changed = self.follow_device_volume();
@@ -547,6 +587,60 @@ impl Route {
         self.last_repair = Some(Instant::now());
         let target = self.target.clone();
         let _ = self.retarget(&target);
+    }
+
+    /// Keeps the microphone that came with the hardware when the output moves
+    /// to our stand-in for it.
+    ///
+    /// Picking AirPods in Control Center selects their microphone too, as an
+    /// input that lasts only while they are the output. Picking "AirPods
+    /// (DisEQ)" next — which is the same AirPods, through the equaliser — ends
+    /// that, and Control Center drops the input back to the one before: with
+    /// the lid shut, a built-in microphone that records nothing. So when the
+    /// output becomes ours, by our hand or the user's, the input it had just
+    /// before is put back if it belongs to the route's hardware, for long
+    /// enough to outlast Control Center's reaction.
+    ///
+    /// Only while the output is still ours. Once it is not, the user has picked
+    /// something since, and the input that came with it is theirs — holding on
+    /// regardless put the built-in microphone back over AirPods chosen a moment
+    /// after the speakers.
+    fn keep_input(&mut self) {
+        let ours = self.driver.as_ref().map(|driver| driver.id);
+        let output_is_ours = ours.is_some() && audio::default_output_device() == ours;
+        if output_is_ours && !self.output_was_ours {
+            self.held_input = self
+                .last_input
+                .filter(|input| self.is_target_microphone(*input))
+                .map(|input| (input, Instant::now() + INPUT_HOLD));
+        }
+        self.output_was_ours = output_is_ours;
+
+        if let Some((input, until)) = self.held_input {
+            if !output_is_ours || Instant::now() >= until || !audio::is_alive(input) {
+                self.held_input = None;
+            } else if audio::default_input_device() != Some(input) {
+                audio::set_default_input_device(input);
+            }
+        }
+        self.last_input = audio::default_input_device();
+    }
+
+    /// Whether `input` is the route's hardware's own microphone: the same
+    /// device, or — Bluetooth publishes the two halves separately — one whose
+    /// UID differs only in its last field.
+    fn is_target_microphone(&self, input: u32) -> bool {
+        if input == self.target.id {
+            return true;
+        }
+        let stem = |uid: &str| uid.rsplit_once(':').map(|(stem, _)| stem.to_owned());
+        match (
+            audio::device_uid(input).as_deref().and_then(stem),
+            self.target.uid.as_deref().and_then(stem),
+        ) {
+            (Some(input), Some(target)) => input == target,
+            _ => false,
+        }
     }
 
     /// The rate the route was built for — the hardware's.
@@ -668,11 +762,18 @@ impl Health {
 /// nothing at all.
 fn claim_default(driver: &Device) -> (bool, i32) {
     let mut status = 0;
+    let before = audio::default_output_device();
     for attempt in 0..12 {
         status = audio::set_default_output_device_status(driver.id);
         audio::set_default_system_output_device(driver.id);
-        if audio::default_output_device() == Some(driver.id) {
+        let now = audio::default_output_device();
+        if now == Some(driver.id) {
             return (true, status);
+        }
+        // Moved by someone else while this was retrying: the user has picked
+        // an output since, and taking it anyway would undo their choice.
+        if now != before {
+            return (false, status);
         }
         if attempt == 0 {
             continue;

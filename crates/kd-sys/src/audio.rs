@@ -20,6 +20,7 @@ const DEFAULT_OUTPUT_DEVICE: u32 = fourcc(b"dOut");
 /// output, but the system tracks it separately — and it is the one the menu-bar
 /// slider follows.
 const DEFAULT_SYSTEM_OUTPUT_DEVICE: u32 = fourcc(b"sOut");
+const DEFAULT_INPUT_DEVICE: u32 = fourcc(b"dIn ");
 const SCOPE_GLOBAL: u32 = fourcc(b"glob");
 const SCOPE_INPUT: u32 = fourcc(b"inpt");
 const SCOPE_OUTPUT: u32 = fourcc(b"outp");
@@ -180,6 +181,23 @@ pub fn default_output_device() -> Option<AudioObjectId> {
     )
     .then_some(device)
     .filter(|id| *id != 0)
+}
+
+/// The device applications record from when they have not picked one.
+pub fn default_input_device() -> Option<AudioObjectId> {
+    let mut device: AudioObjectId = 0;
+    let address = address(DEFAULT_INPUT_DEVICE, SCOPE_GLOBAL);
+    get(SYSTEM_OBJECT, &address, &mut device)
+        .then_some(device)
+        .filter(|id| *id != 0)
+}
+
+pub fn set_default_input_device(device: AudioObjectId) -> bool {
+    set(
+        SYSTEM_OBJECT,
+        &address(DEFAULT_INPUT_DEVICE, SCOPE_GLOBAL),
+        &device,
+    )
 }
 
 /// The device the system plays alerts through and the volume keys act on.
@@ -536,9 +554,17 @@ pub fn transport_type(device: AudioObjectId) -> Option<u32> {
     get(device, &address(TRANSPORT_TYPE, SCOPE_GLOBAL), &mut value).then_some(value)
 }
 
+/// Whether `device` is still there.
+///
+/// Its own "alive" flag is not enough. A device this process is playing to
+/// stays alive here after it has gone — AirPods that disconnected kept
+/// answering for as long as an engine held them, while the system's device
+/// list had dropped them — so it has to be listed too.
 pub fn is_alive(device: AudioObjectId) -> bool {
     let mut value: u32 = 0;
-    get(device, &address(IS_ALIVE, SCOPE_GLOBAL), &mut value) && value != 0
+    get(device, &address(IS_ALIVE, SCOPE_GLOBAL), &mut value)
+        && value != 0
+        && all_devices().contains(&device)
 }
 
 /// Whether some process — this one or any other — is playing through the

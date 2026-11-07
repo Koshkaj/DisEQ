@@ -1,9 +1,13 @@
 //
 //  DisEQ.c — a loopback AudioServerPlugIn
 //
-//  Publishes one virtual device with an output stream apps play into and an
-//  input stream DisEQ records from. Between them sits a ring buffer
-//  indexed by sample time, which is the only thing the driver really does.
+//  Publishes one virtual device with an output stream apps play into, and
+//  hands what they play to the app through a ring buffer in shared memory,
+//  indexed by sample time — which is the only thing the driver really does.
+//
+//  Output only. An input stream would list the device among the microphones,
+//  under the name of the hardware it stands in for — "AirPods (DisEQ)" next to
+//  the AirPods' own — and one picked there records nothing.
 //
 //  The point of the device is its volume control. Outputs like DisplayPort
 //  audio publish no settable volume at all, so nothing in CoreAudio can give
@@ -20,9 +24,8 @@
 //  The volume control published here is a control surface rather than a gain
 //  stage. The menu bar and the volume keys write to it, the app reads it, and
 //  the app applies it on the way to the hardware — at the hardware's own volume
-//  control when it has one, so the gain happens as late as possible. Only the
-//  loopback input stream, which nothing in this project reads, is attenuated
-//  here; the shared ring the app reads carries the mix untouched.
+//  control when it has one, so the gain happens as late as possible. The
+//  shared ring the app reads carries the mix untouched.
 //
 
 #include <CoreAudio/AudioServerPlugIn.h>
@@ -43,7 +46,7 @@
 enum {
     kObjectID_PlugIn = kAudioObjectPlugInObject,
     kObjectID_Device = 2,
-    kObjectID_Stream_Input = 3,
+    // 3 was the input stream.
     kObjectID_Stream_Output = 4,
     kObjectID_Volume_Output_Main = 5,
     kObjectID_Mute_Output_Main = 6,
@@ -100,11 +103,6 @@ static const Float64 kSupportedSampleRates[] = {
 #define kVolumeMinDB (-96.0f)
 #define kVolumeMaxDB (0.0f)
 
-/// Fraction of the remaining distance the applied gain closes each frame. At
-/// 48 kHz this settles a full-scale slider move in about 5 ms — fast enough to
-/// feel immediate, slow enough that no step is audible as a click.
-#define kGainSmoothing 0.0005f
-
 #pragma mark - State
 
 static pthread_mutex_t gStateMutex = PTHREAD_MUTEX_INITIALIZER;
@@ -125,17 +123,11 @@ static _Atomic UInt64 gIOCount = 0;
 static _Atomic bool gMuted = false;
 /// Volume as the HAL sees it, 0..1.
 static _Atomic float gVolumeScalar = 1.0f;
-/// Volume as the samples see it, chasing gVolumeScalar cubed.
-static float gAppliedGain = 1.0f;
 /// How far behind this device the hardware plays, as the app last reported it.
 static _Atomic UInt32 gRouteLatency = 0;
 
 static UInt64 gAnchorHostTime = 0;
 static _Atomic UInt64 gTimestampCount = 0;
-
-/// Interleaved stereo, indexed by sample time modulo its length. Static, so
-/// StartIO allocates nothing.
-static Float32 gRingBuffer[kRingBufferFrames * kChannelCount];
 
 #pragma mark - Shared ring
 
@@ -232,18 +224,6 @@ static void shared_open(void) {
 }
 
 #pragma mark - Volume curve
-
-/// Cubic taper. A linear-in-dB slider spends most of its travel inaudible;
-/// this keeps the useful range spread across the whole thing.
-static float scalar_to_gain(float scalar) {
-    if (scalar <= 0.0f) {
-        return 0.0f;
-    }
-    if (scalar >= 1.0f) {
-        return 1.0f;
-    }
-    return scalar * scalar * scalar;
-}
 
 static Float32 scalar_to_db(Float32 scalar) {
     if (scalar <= 0.0f) {
@@ -635,8 +615,6 @@ static OSStatus kd_PerformDeviceConfigurationChange(AudioServerPlugInDriverRef i
     gSampleRate = requested;
     shared_publish_rate(requested);
     recalculate_host_ticks_per_frame();
-    // The ring's contents belong to the old rate.
-    memset(gRingBuffer, 0, sizeof(gRingBuffer));
     gAnchorHostTime = mach_absolute_time();
     atomic_store(&gTimestampCount, 0);
     pthread_mutex_unlock(&gStateMutex);
@@ -884,22 +862,18 @@ static Boolean device_has_property(const AudioObjectPropertyAddress* address) {
             return true;
         case kAudioDevicePropertyPreferredChannelsForStereo:
         case kAudioDevicePropertyPreferredChannelLayout:
-            return address->mScope == kAudioObjectPropertyScopeInput
-                   || address->mScope == kAudioObjectPropertyScopeOutput;
+            return address->mScope == kAudioObjectPropertyScopeOutput;
         default:
             return false;
     }
 }
 
-/// How many objects the device owns in this scope. Global sees everything;
-/// input sees its stream; output sees its stream and both controls.
+/// How many objects the device owns in this scope. Global and output see the
+/// stream and both controls; input sees nothing.
 static UInt32 device_owned_objects(AudioObjectPropertyScope scope, AudioObjectID* out, UInt32 capacity) {
-    AudioObjectID all[4];
+    AudioObjectID all[3];
     UInt32 count = 0;
 
-    if (scope == kAudioObjectPropertyScopeGlobal || scope == kAudioObjectPropertyScopeInput) {
-        all[count++] = kObjectID_Stream_Input;
-    }
     if (scope == kAudioObjectPropertyScopeGlobal || scope == kAudioObjectPropertyScopeOutput) {
         all[count++] = kObjectID_Stream_Output;
         all[count++] = kObjectID_Volume_Output_Main;
@@ -957,10 +931,8 @@ static OSStatus device_get_property_data_size(const AudioObjectPropertyAddress* 
             *outSize = sizeof(AudioObjectID);
             return 0;
         case kAudioDevicePropertyStreams:
-            if (address->mScope == kAudioObjectPropertyScopeGlobal) {
-                *outSize = 2 * sizeof(AudioObjectID);
-            } else if (address->mScope == kAudioObjectPropertyScopeInput
-                       || address->mScope == kAudioObjectPropertyScopeOutput) {
+            if (address->mScope == kAudioObjectPropertyScopeGlobal
+                || address->mScope == kAudioObjectPropertyScopeOutput) {
                 *outSize = sizeof(AudioObjectID);
             } else {
                 *outSize = 0;
@@ -1140,12 +1112,8 @@ static OSStatus device_get_property_data(const AudioObjectPropertyAddress* addre
             return 0;
 
         case kAudioDevicePropertyStreams: {
-            AudioObjectID streams[2];
+            AudioObjectID streams[1];
             UInt32 total = 0;
-            if (address->mScope == kAudioObjectPropertyScopeGlobal
-                || address->mScope == kAudioObjectPropertyScopeInput) {
-                streams[total++] = kObjectID_Stream_Input;
-            }
             if (address->mScope == kAudioObjectPropertyScopeGlobal
                 || address->mScope == kAudioObjectPropertyScopeOutput) {
                 streams[total++] = kObjectID_Stream_Output;
@@ -1374,7 +1342,7 @@ static OSStatus stream_get_property_data(AudioObjectID objectID,
                                          UInt32 inDataSize,
                                          UInt32* outDataSize,
                                          void* outData) {
-    Boolean isInput = objectID == kObjectID_Stream_Input;
+    (void)objectID;
 
     switch (address->mSelector) {
         case kAudioObjectPropertyBaseClass:
@@ -1403,14 +1371,13 @@ static OSStatus stream_get_property_data(AudioObjectID objectID,
 
         case kAudioStreamPropertyDirection:
             if (inDataSize < sizeof(UInt32)) return kAudioHardwareBadPropertySizeError;
-            *((UInt32*)outData) = isInput ? 1 : 0;
+            *((UInt32*)outData) = 0;
             *outDataSize = sizeof(UInt32);
             return 0;
 
         case kAudioStreamPropertyTerminalType:
             if (inDataSize < sizeof(UInt32)) return kAudioHardwareBadPropertySizeError;
-            *((UInt32*)outData) = isInput ? kAudioStreamTerminalTypeMicrophone
-                                          : kAudioStreamTerminalTypeSpeaker;
+            *((UInt32*)outData) = kAudioStreamTerminalTypeSpeaker;
             *outDataSize = sizeof(UInt32);
             return 0;
 
@@ -1721,7 +1688,6 @@ static Boolean kd_HasProperty(AudioServerPlugInDriverRef inDriver,
             return plugin_has_property(inAddress);
         case kObjectID_Device:
             return device_has_property(inAddress);
-        case kObjectID_Stream_Input:
         case kObjectID_Stream_Output:
             return stream_has_property(inAddress);
         case kObjectID_Volume_Output_Main:
@@ -1756,7 +1722,6 @@ static OSStatus kd_IsPropertySettable(AudioServerPlugInDriverRef inDriver,
                              || inAddress->mSelector == kCustomProperty_Latency;
             return 0;
 
-        case kObjectID_Stream_Input:
         case kObjectID_Stream_Output:
             *outIsSettable = inAddress->mSelector == kAudioStreamPropertyIsActive
                              || inAddress->mSelector == kAudioStreamPropertyVirtualFormat
@@ -1797,7 +1762,6 @@ static OSStatus kd_GetPropertyDataSize(AudioServerPlugInDriverRef inDriver,
             return plugin_get_property_data_size(inAddress, outDataSize);
         case kObjectID_Device:
             return device_get_property_data_size(inAddress, outDataSize);
-        case kObjectID_Stream_Input:
         case kObjectID_Stream_Output:
             return stream_get_property_data_size(inAddress, outDataSize);
         case kObjectID_Volume_Output_Main:
@@ -1828,7 +1792,6 @@ static OSStatus kd_GetPropertyData(AudioServerPlugInDriverRef inDriver,
                                             inDataSize, outDataSize, outData);
         case kObjectID_Device:
             return device_get_property_data(inAddress, inDataSize, outDataSize, outData);
-        case kObjectID_Stream_Input:
         case kObjectID_Stream_Output:
             return stream_get_property_data(inObjectID, inAddress, inDataSize, outDataSize, outData);
         case kObjectID_Volume_Output_Main:
@@ -1865,7 +1828,6 @@ static OSStatus kd_SetPropertyData(AudioServerPlugInDriverRef inDriver,
             status = device_set_property_data(inClientProcessID, inAddress, inDataSize, inData,
                                               &changedCount, changed);
             break;
-        case kObjectID_Stream_Input:
         case kObjectID_Stream_Output:
             status = stream_set_property_data(inAddress, inDataSize, inData, &changedCount, changed);
             break;
@@ -1906,10 +1868,8 @@ static OSStatus kd_StartIO(AudioServerPlugInDriverRef inDriver, AudioObjectID in
     if (count == 0) {
         // First client in: reset the clock and clear whatever the last session
         // left behind.
-        memset(gRingBuffer, 0, sizeof(gRingBuffer));
         gAnchorHostTime = mach_absolute_time();
         atomic_store(&gTimestampCount, 0);
-        gAppliedGain = scalar_to_gain(atomic_load(&gVolumeScalar));
         recalculate_host_ticks_per_frame();
         if (gShared != NULL) {
             memset(gSharedSamples, 0,
@@ -2006,7 +1966,6 @@ static OSStatus kd_WillDoIOOperation(AudioServerPlugInDriverRef inDriver,
 
     switch (inOperationID) {
         case kAudioServerPlugInIOOperationWriteMix:
-        case kAudioServerPlugInIOOperationReadInput:
             willDo = true;
             break;
         default:
@@ -2034,11 +1993,9 @@ static OSStatus kd_BeginIOOperation(AudioServerPlugInDriverRef inDriver,
     return inDeviceObjectID == kObjectID_Device ? 0 : kAudioHardwareBadObjectError;
 }
 
-/// The loopback itself.
+/// Where apps' audio leaves the device for the app.
 ///
-/// Real-time thread: no allocation, no locks, no logging. Volume and mute are
-/// read once per cycle from atomics; the gain then walks towards its target one
-/// frame at a time, so a slider drag does not step.
+/// Real-time thread: no allocation, no locks, no logging.
 static OSStatus kd_DoIOOperation(AudioServerPlugInDriverRef inDriver,
                                  AudioObjectID inDeviceObjectID,
                                  AudioObjectID inStreamObjectID,
@@ -2061,94 +2018,47 @@ static OSStatus kd_DoIOOperation(AudioServerPlugInDriverRef inDriver,
     if (ioMainBuffer == NULL || inIOCycleInfo == NULL) {
         return 0;
     }
+    if (inOperationID != kAudioServerPlugInIOOperationWriteMix) {
+        return 0;
+    }
 
+    // Apps' audio arrives here already mixed. Hand it to the app at its sample
+    // time, then silence the buffer: this device has no hardware to play to.
     Float32* samples = (Float32*)ioMainBuffer;
     const UInt32 ringFrames = kRingBufferFrames;
+    SInt64 sampleTime = (SInt64)inIOCycleInfo->mOutputTime.mSampleTime;
 
-    switch (inOperationID) {
-        case kAudioServerPlugInIOOperationWriteMix: {
-            // Apps' audio arrives here already mixed. Fold it into the ring at
-            // its sample time, then silence the buffer: this device has no
-            // hardware to play to.
-            SInt64 sampleTime = (SInt64)inIOCycleInfo->mOutputTime.mSampleTime;
-            bool muted = atomic_load(&gMuted);
-            float targetGain = muted ? 0.0f : scalar_to_gain(atomic_load(&gVolumeScalar));
-            float gain = gAppliedGain;
-
-            for (UInt32 frame = 0; frame < inIOBufferFrameSize; frame++) {
-                gain += (targetGain - gain) * kGainSmoothing;
-
-                SInt64 writePosition = (sampleTime + (SInt64)frame) % (SInt64)ringFrames;
-                if (writePosition < 0) {
-                    writePosition += ringFrames;
-                }
-                // Stay one ring-length ahead, clearing what the reader has
-                // already passed. Without this, a stopped stream leaves a loop
-                // of stale audio behind.
-                SInt64 clearPosition = (writePosition + (SInt64)(ringFrames / 2)) % (SInt64)ringFrames;
-
-                for (UInt32 channel = 0; channel < kChannelCount; channel++) {
-                    UInt32 source = frame * kChannelCount + channel;
-                    Float32 raw = samples[source];
-                    gRingBuffer[writePosition * kChannelCount + channel] += raw * gain;
-                    gRingBuffer[clearPosition * kChannelCount + channel] = 0.0f;
-                    if (gSharedSamples != NULL) {
-                        // Unattenuated, and deliberately so. This volume control
-                        // is a control surface, not a gain stage: the app reads
-                        // it and applies it on the way to the hardware, at the
-                        // hardware's own volume control where there is one.
-                        // Applying it here as well multiplied the two, and at a
-                        // low setting the product is inaudible.
-                        //
-                        // Assigned, not accumulated: the app is the only reader
-                        // and it reads each frame once, so there is nothing to
-                        // mix with and nothing to clear behind.
-                        gSharedSamples[writePosition * kChannelCount + channel] = raw;
-                    }
-                }
+    if (gSharedSamples != NULL) {
+        for (UInt32 frame = 0; frame < inIOBufferFrameSize; frame++) {
+            SInt64 writePosition = (sampleTime + (SInt64)frame) % (SInt64)ringFrames;
+            if (writePosition < 0) {
+                writePosition += ringFrames;
             }
-
-            if (gShared != NULL) {
-                // Published after the frames it describes, so a reader that
-                // sees this sample time can read up to it.
-                atomic_store(&gShared->written, sampleTime + (SInt64)inIOBufferFrameSize);
+            for (UInt32 channel = 0; channel < kChannelCount; channel++) {
+                // Unattenuated, and deliberately so. This volume control is a
+                // control surface, not a gain stage: the app reads it and
+                // applies it on the way to the hardware, at the hardware's own
+                // volume control where there is one. Applying it here as well
+                // multiplied the two, and at a low setting the product is
+                // inaudible.
+                //
+                // Assigned, not accumulated: the app is the only reader and it
+                // reads each frame once, so there is nothing to mix with and
+                // nothing to clear behind.
+                gSharedSamples[writePosition * kChannelCount + channel] =
+                    samples[frame * kChannelCount + channel];
             }
-
-            gAppliedGain = gain;
-            memset(samples, 0, (size_t)inIOBufferFrameSize * kChannelCount * sizeof(Float32));
-            return 0;
         }
-
-        case kAudioServerPlugInIOOperationReadInput: {
-            // And out again, at the input stream's sample time. Each frame is
-            // cleared once it is a whole ring behind — the same slot, but only
-            // after the first wrap, so nothing the writer put there during
-            // start-up is thrown away before it is read.
-            SInt64 sampleTime = (SInt64)inIOCycleInfo->mInputTime.mSampleTime;
-
-            for (UInt32 frame = 0; frame < inIOBufferFrameSize; frame++) {
-                SInt64 position = sampleTime + (SInt64)frame;
-                SInt64 readPosition = position % (SInt64)ringFrames;
-                if (readPosition < 0) {
-                    readPosition += ringFrames;
-                }
-                Boolean wrapped = position >= (SInt64)ringFrames;
-
-                for (UInt32 channel = 0; channel < kChannelCount; channel++) {
-                    UInt32 destination = frame * kChannelCount + channel;
-                    UInt32 source = (UInt32)(readPosition * kChannelCount + channel);
-                    samples[destination] = gRingBuffer[source];
-                    if (wrapped) {
-                        gRingBuffer[source] = 0.0f;
-                    }
-                }
-            }
-            return 0;
-        }
-
-        default:
-            return 0;
     }
+
+    if (gShared != NULL) {
+        // Published after the frames it describes, so a reader that sees this
+        // sample time can read up to it.
+        atomic_store(&gShared->written, sampleTime + (SInt64)inIOBufferFrameSize);
+    }
+
+    memset(samples, 0, (size_t)inIOBufferFrameSize * kChannelCount * sizeof(Float32));
+    return 0;
 }
 
 static OSStatus kd_EndIOOperation(AudioServerPlugInDriverRef inDriver,

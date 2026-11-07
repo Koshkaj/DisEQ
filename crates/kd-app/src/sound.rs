@@ -599,7 +599,17 @@ impl SoundService {
     fn follow_system_output(&mut self) {
         if self.settle > 0 {
             self.settle = self.settle.saturating_sub(POLL_TICKS);
-            return;
+            // A claim that was seen to take needs no settling: the system
+            // already reported our device, so anything else it reports now is
+            // a fresh pick. Ignoring it for the window took a second and more
+            // to follow a quick second choice, and sometimes never did.
+            if !self
+                .route
+                .as_ref()
+                .is_some_and(|route| route.claimed_default())
+            {
+                return;
+            }
         }
         if self.follow_lost_route() {
             return;
@@ -622,7 +632,18 @@ impl SoundService {
         // of its own. Anything else means the user picked a device in Sound
         // settings, and that is the hardware they want to hear.
         let ours = route.driver().map(|driver| driver.id);
-        if Some(current) == ours || current == route.target().id {
+        if Some(current) == ours {
+            return;
+        }
+        // The hardware the route already plays to, picked directly. It needs no
+        // new engine, only the output back — leaving it there played that
+        // hardware without the equaliser until something else moved the output,
+        // which a quick pick of another device and back reliably left behind.
+        if current == route.target().id {
+            if let Some(route) = self.route.as_mut() {
+                route.reclaim();
+            }
+            self.settle = SETTLE_TICKS;
             return;
         }
         let device = Device::describe(current);
